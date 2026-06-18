@@ -1,0 +1,24 @@
+statistical_baseline:
+  model_id: "gpt2"          # small LM for perplexity scoring
+  batch_size: 16
+  max_length: 512
+  stride: 256
+  threshold: 0.5            # logistic cutoff on normalized log-prob
+  seed: 42
+
+supervised_baseline:
+  model_id: "roberta-base"
+  num_labels: 2
+  max_length: 512
+  batch_size: 16
+  learning_rate: 2.0e-5
+  num_epochs: 3
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  seed: 42
+  checkpoint_dir: "data/checkpoints/supervised_baseline"
+  fp16: false               # set true if GPU available
+
+eval:
+  seed: 42
+  report_dir: "reports"

@@ -1,0 +1,37 @@
+multitude:
+  # Verified: https://huggingface.co/datasets/NLP4Science/multitude
+  hf_id: "NLP4Science/multitude"
+  raw_dir: "data/raw/multitude"
+  splits:
+    train_en: "train"
+    test_en: "test"
+    test_de: "test_de"
+  expected_rows:
+    train_en: 26969
+    test_en: 2491
+    test_de: 2685
+  text_col: "text"
+  label_col: "label"       # 0=human, 1=machine
+  generator_col: "model"
+  language_col: "language"
+
+hc3:
+  # Loaded directly from HuggingFace — no local raw file needed.
+  # HF handles caching in ~/.cache/huggingface/datasets/
+  hf_id: "Hello-SimpleAI/HC3"
+  config: "all"
+  expected_human_approx: 24000
+  expected_machine_approx: 27000
+
+processed:
+  train_en: "data/processed/train_en.parquet"
+  test_en: "data/processed/test_en.parquet"
+  test_de: "data/processed/test_de.parquet"
+
+schema_cols:
+  - text
+  - label          # 0=human, 1=machine
+  - language       # "en" or "de"
+  - source_dataset # "multitude" or "hc3"
+  - domain         # "news", "qa", etc.
+  - generator      # model name or "human"

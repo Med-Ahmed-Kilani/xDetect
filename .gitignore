@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Data — raw and processed files are not committed
+data/raw/multitude/
+data/processed/
+data/checkpoints/
+
+# Reports — generated output, except the gitkeep
+reports/*
+!reports/.gitkeep
+
+# Notebooks — checkpoints
+notebooks/.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# HuggingFace cache (if set to local dir)
+.hf_cache/
