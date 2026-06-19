@@ -1,27 +1,37 @@
 multitude:
-  # Verified: https://huggingface.co/datasets/NLP4Science/multitude
-  hf_id: "NLP4Science/multitude"
-  raw_dir: "data/raw/multitude"
+  # MultiTuDe is on Zenodo, not HuggingFace.
+  # After your access is approved, download and extract the archive, then set
+  # zenodo_dir to the extracted folder (absolute or project-relative path).
+  zenodo_dir: "data/raw/multitude/zenodo"   # <-- update this after extraction
+  raw_dir: "data/raw/multitude"             # where cached parquet files go
+
+  # File layout inside the extracted archive.
+  # Adjust these if the Zenodo archive uses a different structure.
   splits:
-    train_en: "train"
-    test_en: "test"
-    test_de: "test_de"
+    train_en_dir: "en"
+    train_en_file: "train.jsonl"
+    test_en_dir: "en"
+    test_en_file: "test.jsonl"
+    test_de_dir: "de"
+    test_de_file: "test.jsonl"
+
   expected_rows:
     train_en: 26969
     test_en: 2491
     test_de: 2685
+
+  # Column names in the raw Zenodo files (adjust if they differ)
   text_col: "text"
-  label_col: "label"       # 0=human, 1=machine
+  label_col: "label"        # expected values: 0=human, 1=machine
   generator_col: "model"
-  language_col: "language"
 
 hc3:
-  # Loaded directly from HuggingFace — no local raw file needed.
-  # HF handles caching in ~/.cache/huggingface/datasets/
+  # Loaded directly from HuggingFace — HF handles caching automatically.
   hf_id: "Hello-SimpleAI/HC3"
   config: "all"
-  expected_human_approx: 24000
-  expected_machine_approx: 27000
+  # Minimum row counts for validation — hc3.py reads these, no hardcoding there.
+  expected_human_min: 20000
+  expected_machine_min: 24000
 
 processed:
   train_en: "data/processed/train_en.parquet"

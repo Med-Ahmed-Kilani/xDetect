@@ -35,13 +35,13 @@ def main() -> None:
 
     # Step 1 & 2 — Data acquisition
     if not args.skip_download:
-        logger.info("=== Step 1: Downloading MultiTuDe ===")
-        from src.acquisition.multitude import download as dl_multitude
-        dl_multitude(force=args.force)
+        logger.info("=== Step 1: Caching MultiTuDe from Zenodo archive ===")
+        from src.acquisition.multitude import load as load_multitude
+        load_multitude(force=args.force)
 
-        logger.info("=== Step 2: Downloading HC3 ===")
-        from src.acquisition.hc3 import download as dl_hc3
-        dl_hc3(force=args.force)
+        logger.info("=== Step 2: HC3 loads directly from HuggingFace during preprocessing ===")
+        from src.acquisition.hc3 import load as load_hc3
+        load_hc3()  # warms the HF cache early so preprocessing doesn't block
     else:
         logger.info("Skipping data acquisition.")
 

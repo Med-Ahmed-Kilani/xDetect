@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "transformers>=4.40",
     "datasets>=2.19",
+    "requests>=2.31",
     "torch>=2.2",
     "scikit-learn>=1.4",
     "pandas>=2.2",

@@ -17,7 +17,6 @@ supervised_baseline:
   weight_decay: 0.01
   seed: 42
   checkpoint_dir: "data/checkpoints/supervised_baseline"
-  fp16: false               # set true if GPU available
 
 eval:
   seed: 42

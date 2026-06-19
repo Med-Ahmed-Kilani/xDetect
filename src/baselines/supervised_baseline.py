@@ -15,6 +15,7 @@ import pandas as pd
 import torch
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
@@ -81,7 +82,7 @@ class SupervisedBaseline:
 
     @property
     def device(self) -> torch.device:
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device("cpu")
 
     def _load_tokenizer(self) -> None:
         if self._tokenizer is None:
@@ -119,26 +120,21 @@ class SupervisedBaseline:
             optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
         )
 
-        scaler = torch.cuda.amp.GradScaler() if self.fp16 and torch.cuda.is_available() else None
-
+        logger.info("Using device: %s", self.device)
         model.train()
         for epoch in range(self.num_epochs):
             total_loss = 0.0
-            for batch in loader:
+            progress = tqdm(loader, desc=f"Epoch {epoch + 1}/{self.num_epochs}",
+                            unit="batch", dynamic_ncols=True)
+            for batch in progress:
                 optimizer.zero_grad()
                 batch = {k: v.to(self.device) for k, v in batch.items()}
-                if scaler:
-                    with torch.cuda.amp.autocast():
-                        out = model(**batch)
-                    scaler.scale(out.loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    out = model(**batch)
-                    out.loss.backward()
-                    optimizer.step()
+                out = model(**batch)
+                out.loss.backward()
+                optimizer.step()
                 scheduler.step()
                 total_loss += out.loss.item()
+                progress.set_postfix(loss=f"{out.loss.item():.4f}")
             avg = total_loss / len(loader)
             logger.info("Epoch %d/%d — avg loss: %.4f", epoch + 1, self.num_epochs, avg)
 
