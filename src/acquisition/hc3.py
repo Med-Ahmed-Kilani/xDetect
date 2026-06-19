@@ -13,7 +13,7 @@ import logging
 import pandas as pd
 import requests
 
-from src.config import load_config
+from src.config import load_config, resolve_path
 
 logger = logging.getLogger(__name__)
 
@@ -58,17 +58,42 @@ def _flatten(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load() -> pd.DataFrame:
+def _validate(df: pd.DataFrame, expected_human_min: int, expected_machine_min: int) -> None:
+    n_human   = (df["label"] == 0).sum()
+    n_machine = (df["label"] == 1).sum()
+    logger.info("HC3 EN: %d human rows, %d machine rows", n_human, n_machine)
+    if n_human < expected_human_min:
+        raise ValueError(
+            f"HC3 human rows={n_human} < expected minimum {expected_human_min} "
+            f"(set in configs/datasets.yaml hc3.expected_human_min)"
+        )
+    if n_machine < expected_machine_min:
+        raise ValueError(
+            f"HC3 machine rows={n_machine} < expected minimum {expected_machine_min} "
+            f"(set in configs/datasets.yaml hc3.expected_machine_min)"
+        )
+
+
+def load(force: bool = False) -> pd.DataFrame:
     """
     Return the HC3 English subset as a flattened DataFrame.
 
     Columns: text, label (0=human / 1=machine), generator, question.
-    Loads parquet files directly from HuggingFace — no datasets library needed.
+    Results are cached locally at data/raw/hc3/hc3_en.parquet. Subsequent
+    calls return the cached file without hitting the network unless force=True.
     Validation thresholds are read from configs/datasets.yaml.
     """
     cfg = load_config("datasets")["hc3"]
     expected_human_min   = cfg["expected_human_min"]
     expected_machine_min = cfg["expected_machine_min"]
+
+    cache_path = resolve_path("data/raw/hc3/hc3_en.parquet")
+
+    if cache_path.exists() and not force:
+        logger.info("Loading HC3 from local cache: %s", cache_path)
+        df = pd.read_parquet(cache_path)
+        _validate(df, expected_human_min, expected_machine_min)
+        return df
 
     logger.info("Fetching HC3 parquet URLs from HuggingFace datasets server …")
     urls = _get_parquet_urls(cfg["hf_id"], cfg["config"], split="train")
@@ -83,20 +108,11 @@ def load() -> pd.DataFrame:
     logger.info("Flattening Q&A rows …")
     df = _flatten(raw_df)
 
-    n_human   = (df["label"] == 0).sum()
-    n_machine = (df["label"] == 1).sum()
-    logger.info("HC3 EN: %d human rows, %d machine rows", n_human, n_machine)
+    _validate(df, expected_human_min, expected_machine_min)
 
-    if n_human < expected_human_min:
-        raise ValueError(
-            f"HC3 human rows={n_human} < expected minimum {expected_human_min} "
-            f"(set in configs/datasets.yaml hc3.expected_human_min)"
-        )
-    if n_machine < expected_machine_min:
-        raise ValueError(
-            f"HC3 machine rows={n_machine} < expected minimum {expected_machine_min} "
-            f"(set in configs/datasets.yaml hc3.expected_machine_min)"
-        )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(cache_path, index=False)
+    logger.info("HC3 cached to %s", cache_path)
 
     return df
 

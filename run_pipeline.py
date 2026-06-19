@@ -39,9 +39,9 @@ def main() -> None:
         from src.acquisition.multitude import load as load_multitude
         load_multitude(force=args.force)
 
-        logger.info("=== Step 2: HC3 loads directly from HuggingFace during preprocessing ===")
+        logger.info("=== Step 2: Caching HC3 from HuggingFace ===")
         from src.acquisition.hc3 import load as load_hc3
-        load_hc3()  # warms the HF cache early so preprocessing doesn't block
+        load_hc3(force=args.force)  # writes data/raw/hc3/hc3_en.parquet on first run
     else:
         logger.info("Skipping data acquisition.")
 
