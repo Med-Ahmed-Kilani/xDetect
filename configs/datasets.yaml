@@ -1,47 +1,42 @@
-multitude:
-  # MultiTuDe is on Zenodo, not HuggingFace.
-  # After your access is approved, download and extract the archive, then set
-  # zenodo_dir to the extracted folder (absolute or project-relative path).
-  zenodo_dir: "data/raw/multitude/zenodo"   # <-- update this after extraction
-  raw_dir: "data/raw/multitude"             # where cached parquet files go
+multitude_v3:
+  # Single flat CSV already on disk — place it at the path below.
+  # Columns: text, label (0=human/1=machine), multi_label (generator name or
+  # "human"), split ("train"/"test"), language ("en"/"de"), length, source.
+  csv_path: "data/raw/multitude_v3/multitude_v3_clean.csv"
 
-  # File layout inside the extracted archive.
-  # Adjust these if the Zenodo archive uses a different structure.
-  splits:
-    train_en_dir: "en"
-    train_en_file: "train.jsonl"
-    test_en_dir: "en"
-    test_en_file: "test.jsonl"
-    test_de_dir: "de"
-    test_de_file: "test.jsonl"
-
+  # Confirmed real row counts (Macko et al., 2025).
+  # The acquisition script asserts these exactly so a wrong file is caught early.
   expected_rows:
-    train_en: 26969
-    test_en: 2491
-    test_de: 2685
+    train_en: 7954
+    test_en:  2384
+    train_de: 7951
+    test_de:  2388
+  expected_generators: 8   # human + 7 LLMs per split
 
-  # Column names in the raw Zenodo files (adjust if they differ)
-  text_col: "text"
-  label_col: "label"        # expected values: 0=human, 1=machine
-  generator_col: "model"
+  # Column names in the CSV
+  text_col:      "text"
+  label_col:     "label"       # 0=human, 1=machine
+  generator_col: "multi_label" # generator name or "human"
+  split_col:     "split"       # "train" or "test"
+  language_col:  "language"    # "en" or "de"
 
 hc3:
-  # Loaded directly from HuggingFace — HF handles caching automatically.
+  # DEFERRED — reserved for an optional Month 4 robustness check.
+  # Not called from run_pipeline.py; kept here for documentation only.
   hf_id: "Hello-SimpleAI/HC3"
   config: "all"
-  # Minimum row counts for validation — hc3.py reads these, no hardcoding there.
   expected_human_min: 20000
   expected_machine_min: 24000
 
 processed:
   train_en: "data/processed/train_en.parquet"
-  test_en: "data/processed/test_en.parquet"
-  test_de: "data/processed/test_de.parquet"
+  test_en:  "data/processed/test_en.parquet"
+  test_de:  "data/processed/test_de.parquet"
 
 schema_cols:
   - text
   - label          # 0=human, 1=machine
   - language       # "en" or "de"
-  - source_dataset # "multitude" or "hc3"
-  - domain         # "news", "qa", etc.
+  - source_dataset # "multitude_v3"
+  - domain         # "news"
   - generator      # model name or "human"

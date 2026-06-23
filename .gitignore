@@ -11,7 +11,7 @@ venv/
 env/
 
 # Data — raw and processed files are not committed
-data/raw/multitude/
+data/raw/multitude_v3/
 data/processed/
 data/checkpoints/
 

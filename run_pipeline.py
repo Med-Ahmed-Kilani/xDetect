@@ -1,20 +1,21 @@
 """
-Top-level pipeline runner for Month 1.
+Top-level pipeline runner — Month 1 (MultiTuDe v3, English baseline).
 
-Runs all steps in order:
-  1. Download MultiTuDe
-  2. Download HC3
-  3. Preprocess
-  4. Train supervised baseline
-  5. Run evaluation harness
-  6. Generate Month 1 findings report
+Steps:
+  1. Cache MultiTuDe v3 splits from the local CSV
+  2. Preprocess → data/processed/
+  3. Train supervised baseline (RoBERTa-base, English only)
+  4. Run evaluation harness (EN in-distribution + DE zero-shot)
+  5. Generate Month 1 findings report
+
+Note: HC3 acquisition exists in src/acquisition/hc3.py but is NOT called
+here — it is reserved for an optional Month 4 robustness check.
 
 Usage:
-    python run_pipeline.py [--force] [--skip-download] [--skip-train]
+    python run_pipeline.py [--force] [--skip-acquisition] [--skip-train]
 """
 import argparse
 import logging
-import sys
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,36 +27,29 @@ logger = logging.getLogger("pipeline")
 def main() -> None:
     parser = argparse.ArgumentParser(description="Month 1 pipeline runner")
     parser.add_argument("--force", action="store_true",
-                        help="Re-download and re-run all steps even if cached")
-    parser.add_argument("--skip-download", action="store_true",
-                        help="Skip data acquisition (assume raw files exist)")
+                        help="Re-run all steps even if outputs are already cached")
+    parser.add_argument("--skip-acquisition", action="store_true",
+                        help="Skip CSV filtering (assume data/raw/multitude_v3/ parquets exist)")
     parser.add_argument("--skip-train", action="store_true",
                         help="Skip supervised baseline training (assume checkpoint exists)")
     args = parser.parse_args()
 
-    # Step 1 & 2 — Data acquisition
-    if not args.skip_download:
-        logger.info("=== Step 1: Caching MultiTuDe from Zenodo archive ===")
+    # Step 1 — Filter and cache MultiTuDe v3 splits
+    if not args.skip_acquisition:
+        logger.info("=== Step 1: Caching MultiTuDe v3 splits ===")
         from src.acquisition.multitude import load as load_multitude
         load_multitude(force=args.force)
-
-        logger.info("=== Step 2: Caching HC3 from HuggingFace ===")
-        from src.acquisition.hc3 import load as load_hc3
-        load_hc3(force=args.force)  # writes data/raw/hc3/hc3_en.parquet on first run
     else:
-        logger.info("Skipping data acquisition.")
+        logger.info("Skipping acquisition.")
 
-    # Step 3 — Preprocessing
-    logger.info("=== Step 3: Preprocessing ===")
+    # Step 2 — Preprocess
+    logger.info("=== Step 2: Preprocessing ===")
     from src.preprocessing.pipeline import run as preprocess
     preprocess(force=args.force)
 
-    # Step 4 — Statistical baseline (no training needed, but scored at eval time)
-    logger.info("=== Step 6: Statistical baseline — scored in eval harness ===")
-
-    # Step 5 — Supervised baseline training
+    # Step 3 — Train supervised baseline
     if not args.skip_train:
-        logger.info("=== Step 7: Training supervised baseline ===")
+        logger.info("=== Step 3: Training supervised baseline ===")
         from src.config import resolve_path
         from src.baselines.supervised_baseline import SupervisedBaseline
         baseline = SupervisedBaseline()
@@ -66,13 +60,13 @@ def main() -> None:
     else:
         logger.info("Skipping supervised baseline training.")
 
-    # Step 8 — Evaluation harness
-    logger.info("=== Step 8: Running evaluation harness ===")
+    # Step 4 — Evaluation harness (statistical + supervised, EN + DE)
+    logger.info("=== Step 4: Running evaluation harness ===")
     from src.eval.harness import run as run_eval
     run_eval(force_rescore=args.force)
 
-    # Step 9 — Month 1 findings report
-    logger.info("=== Step 9: Generating Month 1 findings report ===")
+    # Step 5 — Month 1 findings report
+    logger.info("=== Step 5: Generating Month 1 findings report ===")
     from src.eval.report import generate
     report_path = generate()
     logger.info("Done. Month 1 findings: %s", report_path)

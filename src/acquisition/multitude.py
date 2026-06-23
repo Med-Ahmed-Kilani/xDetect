@@ -1,24 +1,20 @@
 """
-Load MultiTuDe splits from a locally downloaded Zenodo archive.
+Load MultiTuDe v3 from the local CSV file.
 
-MultiTuDe is distributed via Zenodo (not HuggingFace). After your Zenodo
-access is approved, download the archive and extract it. Then set the path
-in configs/datasets.yaml under multitude.zenodo_dir.
+multitude_v3_clean.csv is a single flat file with columns:
+  text, label (0/1), multi_label (generator name or "human"),
+  split ("train"/"test"), language ("en"/"de"), length, source.
 
-Expected layout inside the extracted archive (adjust zenodo_dir if yours differs):
-  <zenodo_dir>/
-    en/
-      train.jsonl   (or .csv / .parquet — see file_format in config)
-      test.jsonl
-    de/
-      test.jsonl
+This script filters to English and German, caches each split as a parquet
+file under data/raw/multitude_v3/, and validates row counts and generator
+counts against the confirmed figures from Macko et al., 2025.
 
-Outputs (cached parquet files):
-  data/raw/multitude/train_en.parquet
-  data/raw/multitude/test_en.parquet
-  data/raw/multitude/test_de.parquet
+Cached outputs:
+  data/raw/multitude_v3/train_en.parquet   (7,954 rows)
+  data/raw/multitude_v3/test_en.parquet    (2,384 rows)
+  data/raw/multitude_v3/train_de.parquet   (7,951 rows — reserved for Month 3)
+  data/raw/multitude_v3/test_de.parquet    (2,388 rows)
 """
-import hashlib
 import json
 import logging
 from pathlib import Path
@@ -29,137 +25,93 @@ from src.config import load_config, resolve_path
 
 logger = logging.getLogger(__name__)
 
-ROW_COUNT_TOLERANCE = 0.05
 
-
-def _sha256_of_texts(texts: list[str]) -> str:
-    h = hashlib.sha256()
-    for t in sorted(texts[:1000]):
-        h.update(t.encode("utf-8", errors="replace"))
-    return h.hexdigest()
-
-
-def _validate_row_count(split_name: str, df: pd.DataFrame, expected: int) -> None:
+def _validate_split(name: str, df: pd.DataFrame,
+                    expected_rows: int, expected_generators: int) -> None:
     actual = len(df)
-    delta = abs(actual - expected) / expected
-    if delta > ROW_COUNT_TOLERANCE:
+    if actual != expected_rows:
         raise ValueError(
-            f"MultiTuDe {split_name}: expected ~{expected} rows, got {actual} "
-            f"(delta={delta:.1%} exceeds {ROW_COUNT_TOLERANCE:.0%} tolerance)"
+            f"MultiTuDe v3 {name}: expected {expected_rows} rows, got {actual}."
         )
-    logger.info("  %s: %d rows (expected ~%d) ✓", split_name, actual, expected)
-
-
-def _read_file(path: Path) -> pd.DataFrame:
-    """Read a data file based on its extension."""
-    suffix = path.suffix.lower()
-    if suffix == ".jsonl":
-        return pd.read_json(path, lines=True)
-    elif suffix == ".csv":
-        return pd.read_csv(path)
-    elif suffix == ".parquet":
-        return pd.read_parquet(path)
-    else:
-        raise ValueError(f"Unsupported file format: {suffix}. "
-                         f"Update multitude.file_format in configs/datasets.yaml.")
-
-
-def _find_split_file(base_dir: Path, candidates: list[str]) -> Path:
-    """Find the first existing file from a list of candidate names."""
-    for name in candidates:
-        p = base_dir / name
-        if p.exists():
-            return p
-    raise FileNotFoundError(
-        f"Could not find any of {candidates} in {base_dir}. "
-        f"Check multitude.zenodo_dir in configs/datasets.yaml."
-    )
+    n_generators = df["generator"].nunique()
+    if n_generators != expected_generators:
+        raise ValueError(
+            f"MultiTuDe v3 {name}: expected {expected_generators} distinct "
+            f"generator values, got {n_generators}: {sorted(df['generator'].unique())}"
+        )
+    logger.info("  %s: %d rows, %d generators ✓", name, actual, n_generators)
+    for gen, count in df["generator"].value_counts().items():
+        logger.info("    %-30s %d", gen, count)
 
 
 def load(force: bool = False) -> dict[str, Path]:
     """
-    Load MultiTuDe from the local Zenodo archive and cache as parquet.
+    Filter and cache all four MultiTuDe v3 splits.
 
-    Parameters
-    ----------
-    force : re-process even if cached parquet files already exist.
-
-    Returns
-    -------
-    dict mapping split name → absolute Path to cached parquet.
+    Returns a dict mapping split name → absolute Path to the cached parquet.
+    Reads from cache on subsequent calls unless force=True.
     """
-    cfg = load_config("datasets")["multitude"]
-    raw_dir = resolve_path(cfg["raw_dir"])
+    cfg = load_config("datasets")["multitude_v3"]
+    csv_path = resolve_path(cfg["csv_path"])
+    raw_dir = csv_path.parent
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     out_paths: dict[str, Path] = {
         "train_en": raw_dir / "train_en.parquet",
         "test_en":  raw_dir / "test_en.parquet",
+        "train_de": raw_dir / "train_de.parquet",
         "test_de":  raw_dir / "test_de.parquet",
     }
 
     if all(p.exists() for p in out_paths.values()) and not force:
-        logger.info("MultiTuDe already cached at %s — skipping.", raw_dir)
+        logger.info("MultiTuDe v3 splits already cached at %s — skipping.", raw_dir)
         return out_paths
 
-    zenodo_dir = resolve_path(cfg["zenodo_dir"])
-    if not zenodo_dir.exists():
+    if not csv_path.exists():
         raise FileNotFoundError(
-            f"MultiTuDe zenodo_dir not found: {zenodo_dir}\n"
-            f"Download the archive from Zenodo and set multitude.zenodo_dir "
-            f"in configs/datasets.yaml to the extracted folder path."
+            f"MultiTuDe v3 CSV not found: {csv_path}\n"
+            f"Place multitude_v3_clean.csv under data/raw/multitude_v3/ "
+            f"and update multitude_v3.csv_path in configs/datasets.yaml if needed."
         )
 
-    expected_rows = cfg["expected_rows"]
-    file_candidates = cfg.get("file_candidates", ["train.jsonl", "train.csv", "train.parquet"])
-    text_col = cfg["text_col"]
-    label_col = cfg["label_col"]
-    generator_col = cfg["generator_col"]
+    logger.info("Reading %s …", csv_path)
+    df = pd.read_csv(csv_path)
 
-    split_dirs = {
-        "train_en": (zenodo_dir / cfg["splits"]["train_en_dir"],
-                     cfg["splits"]["train_en_file"]),
-        "test_en":  (zenodo_dir / cfg["splits"]["test_en_dir"],
-                     cfg["splits"]["test_en_file"]),
-        "test_de":  (zenodo_dir / cfg["splits"]["test_de_dir"],
-                     cfg["splits"]["test_de_file"]),
+    text_col      = cfg["text_col"]
+    label_col     = cfg["label_col"]
+    generator_col = cfg["generator_col"]
+    split_col     = cfg["split_col"]
+    language_col  = cfg["language_col"]
+
+    # Rename to canonical names used throughout the pipeline
+    df = df.rename(columns={
+        text_col:      "text",
+        label_col:     "label",
+        generator_col: "generator",
+        split_col:     "split",
+        language_col:  "language",
+    })
+    df["label"] = df["label"].astype(int)
+
+    expected_rows       = cfg["expected_rows"]
+    expected_generators = cfg["expected_generators"]
+
+    split_map = {
+        "train_en": ("en", "train"),
+        "test_en":  ("en", "test"),
+        "train_de": ("de", "train"),
+        "test_de":  ("de", "test"),
     }
 
-    checksums: dict = {}
-    for split_name, (split_dir, filename) in split_dirs.items():
-        logger.info("Loading %s from %s …", split_name, split_dir / filename)
-        src = split_dir / filename
-        if not src.exists():
-            raise FileNotFoundError(
-                f"Expected {src} — check multitude.splits in configs/datasets.yaml."
-            )
-        df = _read_file(src)
+    for split_name, (lang, split_val) in split_map.items():
+        logger.info("Processing %s …", split_name)
+        subset = df[(df["language"] == lang) & (df["split"] == split_val)].copy()
+        subset = subset.reset_index(drop=True)
+        _validate_split(split_name, subset,
+                        expected_rows[split_name], expected_generators)
+        subset.to_parquet(out_paths[split_name], index=False)
 
-        # Rename columns to standard names using config mapping
-        rename = {}
-        for cfg_key, standard in [
-            (text_col, "text"),
-            (label_col, "label"),
-            (generator_col, "generator"),
-        ]:
-            if cfg_key in df.columns and cfg_key != standard:
-                rename[cfg_key] = standard
-        if rename:
-            df = df.rename(columns=rename)
-
-        _validate_row_count(split_name, df, expected_rows[split_name])
-
-        df.to_parquet(out_paths[split_name], index=False)
-        checksums[split_name] = {
-            "rows": len(df),
-            "text_hash": _sha256_of_texts(df["text"].tolist()) if "text" in df else "",
-        }
-
-    log_path = raw_dir / "checksums.json"
-    with open(log_path, "w") as f:
-        json.dump(checksums, f, indent=2)
-    logger.info("Checksums written to %s", log_path)
-
+    logger.info("All splits cached under %s", raw_dir)
     return out_paths
 
 
