@@ -82,7 +82,7 @@ class SupervisedBaseline:
 
     @property
     def device(self) -> torch.device:
-        return torch.device("cpu")
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def _load_tokenizer(self) -> None:
         if self._tokenizer is None:
