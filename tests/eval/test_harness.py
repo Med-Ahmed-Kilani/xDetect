@@ -84,13 +84,34 @@ class TestFlagSuspicious:
         assert "near-perfect" in warnings[0].lower() or "WARNING" in warnings[0]
 
     def test_normal_accuracy_not_flagged(self):
-        metrics = {"overall": {"accuracy": 0.80}}
+        metrics = {"overall": {"accuracy": 0.80, "auroc": 0.85}}
         warnings = _flag_suspicious(metrics, "test_en", "supervised")
         assert warnings == []
 
     def test_missing_accuracy_no_crash(self):
         metrics = {"overall": {}}
         warnings = _flag_suspicious(metrics, "test_en", "supervised")
+        assert warnings == []
+
+    def test_divergence_high_acc_low_auroc_flagged(self):
+        metrics = {"overall": {"accuracy": 0.85, "auroc": 0.70}}
+        warnings = _flag_suspicious(metrics, "test_de", "supervised")
+        assert len(warnings) == 1
+        assert "confusion matrix" in warnings[0]
+
+    def test_divergence_not_flagged_when_auroc_acceptable(self):
+        metrics = {"overall": {"accuracy": 0.85, "auroc": 0.80}}
+        warnings = _flag_suspicious(metrics, "test_de", "supervised")
+        assert warnings == []
+
+    def test_divergence_not_flagged_when_accuracy_below_threshold(self):
+        metrics = {"overall": {"accuracy": 0.75, "auroc": 0.60}}
+        warnings = _flag_suspicious(metrics, "test_de", "supervised")
+        assert warnings == []
+
+    def test_divergence_not_flagged_when_auroc_missing(self):
+        metrics = {"overall": {"accuracy": 0.90, "auroc": None}}
+        warnings = _flag_suspicious(metrics, "test_de", "supervised")
         assert warnings == []
 
 

@@ -26,13 +26,19 @@ logger = logging.getLogger(__name__)
 
 SUSPICIOUS_ACCURACY_LO = 0.52   # near-chance — flag for review
 SUSPICIOUS_ACCURACY_HI = 0.995  # near-perfect — flag for review
+DIVERGENCE_ACC_MIN  = 0.80      # high accuracy threshold for divergence check
+DIVERGENCE_AUROC_MAX = 0.75     # mediocre AUROC threshold for divergence check
 
 
 def _flag_suspicious(metrics: dict, split: str, model: str) -> list[str]:
     warnings: list[str] = []
-    acc = metrics.get("overall", {}).get("accuracy")
+    overall = metrics.get("overall", {})
+    acc   = overall.get("accuracy")
+    auroc = overall.get("auroc")
+
     if acc is None:
         return warnings
+
     if acc <= SUSPICIOUS_ACCURACY_LO:
         warnings.append(
             f"WARNING: {model} on {split} accuracy={acc:.3f} is near chance "
@@ -42,6 +48,12 @@ def _flag_suspicious(metrics: dict, split: str, model: str) -> list[str]:
         warnings.append(
             f"WARNING: {model} on {split} accuracy={acc:.3f} is suspiciously "
             f"near-perfect (≥{SUSPICIOUS_ACCURACY_HI}). Check for data leakage."
+        )
+    if auroc is not None and acc >= DIVERGENCE_ACC_MIN and auroc <= DIVERGENCE_AUROC_MAX:
+        warnings.append(
+            f"WARNING: {model} on {split}: high accuracy ({acc:.3f}) but mediocre "
+            f"AUROC ({auroc:.3f}) — possible majority-class collapse under class "
+            f"imbalance, not genuine discrimination. Check confusion matrix."
         )
     return warnings
 
