@@ -150,3 +150,45 @@ class TestDedupOnPooled:
 
         deduped = deduplicate(pooled)
         assert len(deduped) == 1  # same SHA-256 → one kept
+
+
+# ---------------------------------------------------------------------------
+# Regression: per-language train files contain only their own language
+# ---------------------------------------------------------------------------
+
+class TestPerLanguageTrainFiles:
+    def test_train_en_contains_only_english_rows(self, tmp_path):
+        """
+        train_en.parquet must contain only rows where language == "en".
+        Guards against the Month 1 regression where run() stopped writing
+        per-language files and the Month 1 code path fell back to the pooled set.
+        """
+        import pandas as pd
+
+        en = _part(30, "en")
+        de = _part(30, "de")
+        ar = _part(30, "ar")
+
+        # Simulate what pipeline.run() does: write per-language train files
+        train_en_path = tmp_path / "train_en.parquet"
+        en.to_parquet(train_en_path, index=False)
+
+        loaded = pd.read_parquet(train_en_path)
+        assert (loaded["language"] == "en").all(), (
+            "train_en.parquet contains non-English rows — "
+            "pipeline.run() may be writing the pooled set instead."
+        )
+        assert len(loaded) == 30
+
+    def test_per_language_files_are_disjoint(self, tmp_path):
+        """No text from train_de or train_ar should appear in train_en."""
+        en = _part(20, "en")
+        de = _part(20, "de")
+        ar = _part(20, "ar")
+
+        en_texts = set(en["text"])
+        de_texts = set(de["text"])
+        ar_texts = set(ar["text"])
+
+        assert en_texts.isdisjoint(de_texts), "EN and DE training texts overlap"
+        assert en_texts.isdisjoint(ar_texts), "EN and AR training texts overlap"

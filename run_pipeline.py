@@ -66,7 +66,7 @@ def main() -> None:
             from src.baselines.supervised_baseline import SupervisedBaseline
             baseline = SupervisedBaseline()
             baseline.run_and_save(
-                train_parquet=resolve_path("data/processed/train_pooled.parquet"),
+                train_parquet=resolve_path("data/processed/train_en.parquet"),
                 test_parquet=resolve_path("data/processed/test_en.parquet"),
             )
         else:

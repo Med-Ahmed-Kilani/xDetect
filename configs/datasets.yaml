@@ -41,8 +41,9 @@ hc3:
 
 processed:
   # Paths use {lang} placeholder — resolved at runtime.
-  train_pooled: "data/processed/train_pooled.parquet"
-  test_template: "data/processed/test_{lang}.parquet"
+  train_pooled:   "data/processed/train_pooled.parquet"
+  train_template: "data/processed/train_{lang}.parquet"
+  test_template:  "data/processed/test_{lang}.parquet"
 
 schema_cols:
   - text

@@ -168,11 +168,15 @@ def run(force: bool = False) -> dict[str, Path]:
     processed_cfg = load_config("datasets")["processed"]
 
     out_train = resolve_path(processed_cfg["train_pooled"])
+    out_trains = {
+        lang: resolve_path(processed_cfg["train_template"].replace("{lang}", lang))
+        for lang in train_langs
+    }
     out_tests = {
         lang: resolve_path(processed_cfg["test_template"].replace("{lang}", lang))
         for lang in languages
     }
-    all_outputs = [out_train, *out_tests.values()]
+    all_outputs = [out_train, *out_trains.values(), *out_tests.values()]
 
     if all(p.exists() for p in all_outputs) and not force:
         logger.info("Processed files already exist — skipping preprocessing.")
@@ -210,14 +214,22 @@ def run(force: bool = False) -> dict[str, Path]:
 
     logger.info("Writing processed files …")
     train_df.to_parquet(out_train, index=False)
+    for lang, part in zip(train_langs, train_parts):
+        part.to_parquet(out_trains[lang], index=False)
     for lang, df in test_dfs.items():
         df.to_parquet(out_tests[lang], index=False)
 
     logger.info("train_pooled: %d rows", len(train_df))
+    for lang, part in zip(train_langs, train_parts):
+        logger.info("train_%s:     %d rows", lang, len(part))
     for lang, df in test_dfs.items():
         logger.info("test_%s:     %d rows", lang, len(df))
 
-    return {"train_pooled": out_train, **{f"test_{l}": p for l, p in out_tests.items()}}
+    return {
+        "train_pooled": out_train,
+        **{f"train_{l}": p for l, p in out_trains.items()},
+        **{f"test_{l}":  p for l, p in out_tests.items()},
+    }
 
 
 if __name__ == "__main__":
