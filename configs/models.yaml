@@ -1,11 +1,12 @@
 statistical_baseline:
-  model_id: "gpt2"          # small LM for perplexity scoring
+  model_id: "gpt2"
   batch_size: 16
   max_length: 512
   stride: 256
-  threshold: 0.5            # logistic cutoff on normalized log-prob
+  threshold: 0.5
   seed: 42
 
+# Month 1 English-only supervised baseline (kept for reference / regression).
 supervised_baseline:
   model_id: "roberta-base"
   num_labels: 2
@@ -18,6 +19,50 @@ supervised_baseline:
   seed: 42
   checkpoint_dir: "data/checkpoints/supervised_baseline"
 
+# Month 2 multilingual backbone candidates.
+# All share the same hyperparameters so comparisons are fair.
+# fp16 is explicitly false for mdeberta (model card: fp16 unsupported).
+mbert:
+  model_id: "bert-base-multilingual-cased"
+  num_labels: 2
+  max_length: 512
+  batch_size: 16
+  learning_rate: 2.0e-5
+  num_epochs: 3
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  seed: 42
+  fp16: false
+  checkpoint_dir: "data/checkpoints/mbert"
+
+xlmr_base:
+  model_id: "xlm-roberta-base"
+  num_labels: 2
+  max_length: 512
+  batch_size: 16
+  learning_rate: 2.0e-5
+  num_epochs: 3
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  seed: 42
+  fp16: false
+  checkpoint_dir: "data/checkpoints/xlmr_base"
+
+mdeberta_v3_base:
+  model_id: "microsoft/mdeberta-v3-base"
+  num_labels: 2
+  max_length: 512
+  batch_size: 8    # larger embedding table — reduce batch size vs. others
+  learning_rate: 2.0e-5
+  num_epochs: 3
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  seed: 42
+  fp16: false      # mDeBERTa-v3 model card: fp16 training not supported
+  checkpoint_dir: "data/checkpoints/mdeberta_v3_base"
+
 eval:
   seed: 42
   report_dir: "reports"
+  # Backbone names in the order they appear in comparison reports.
+  backbone_names: ["mbert", "xlmr_base", "mdeberta_v3_base"]

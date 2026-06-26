@@ -1,18 +1,18 @@
 """
-Unified preprocessing pipeline — MultiTuDe v3 only.
+Unified preprocessing pipeline — MultiTuDe v3, config-driven languages.
 
-Reads cached parquet splits from data/raw/multitude_v3/, applies cleaning,
-schema unification, and deduplication, then writes:
+Reads cached per-language parquet splits from data/raw/multitude_v3/,
+applies cleaning, schema unification, and deduplication, then writes:
 
-  data/processed/train_en.parquet  — English training set (EN split only)
-  data/processed/test_en.parquet   — English test set (frozen)
-  data/processed/test_de.parquet   — German test set (frozen, zero-shot eval)
+  data/processed/train_pooled.parquet  — pooled training set (all train_languages)
+  data/processed/test_{lang}.parquet   — one frozen test file per language
 
-Note: the German training split (train_de) exists in v3 but is intentionally
-not used here — it is reserved for the Month 3 adapter experiments.
+Languages to acquire and languages to pool in training are both driven by
+configs/datasets.yaml (multitude_v3.languages / train_languages).
 
-A leakage check confirms zero text-hash overlap between the training set and
-either test set before writing the outputs.
+Note: German and Arabic training splits exist in v3 but are included here
+for Month 2's backbone comparison. The German/Arabic data was intentionally
+withheld from training in Month 1 to preserve the zero-shot transfer baseline.
 """
 import hashlib
 import logging
@@ -70,12 +70,7 @@ def text_hash(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _unify_multitude_v3(df: pd.DataFrame, language: str) -> pd.DataFrame:
-    """
-    Map a cached MultiTuDe v3 parquet split to the unified pipeline schema.
-
-    The raw parquet already has 'text', 'label', 'generator', 'language'
-    columns from the acquisition step — we just add the fixed metadata fields.
-    """
+    """Add fixed metadata fields to a cached v3 parquet split."""
     df = df.copy()
     df["language"]       = language
     df["source_dataset"] = "multitude_v3"
@@ -130,7 +125,6 @@ def check_no_leakage(train_df: pd.DataFrame, *test_dfs: pd.DataFrame,
 # ---------------------------------------------------------------------------
 
 def _clean_df(df: pd.DataFrame, split_name: str) -> pd.DataFrame:
-    """Apply text cleaning and drop rows that don't survive it."""
     before = len(df)
     df = df.copy()
     df["text"] = df["text"].apply(clean_text)
@@ -147,6 +141,13 @@ def _log_generator_counts(split_name: str, df: pd.DataFrame) -> None:
         logger.info("  %-30s %d", gen, count)
 
 
+def _load_split(raw_dir: Path, split: str, lang: str) -> pd.DataFrame:
+    path = raw_dir / f"{split}_{lang}.parquet"
+    logger.info("Loading %s_%s from %s …", split, lang, path)
+    df = pd.read_parquet(path)
+    return _unify_multitude_v3(df, lang)
+
+
 # ---------------------------------------------------------------------------
 # Full pipeline
 # ---------------------------------------------------------------------------
@@ -155,48 +156,68 @@ def run(force: bool = False) -> dict[str, Path]:
     """
     Run the full preprocessing pipeline.
 
-    Returns paths to the three processed parquet files.
+    Pools training data for all train_languages and writes one test file per
+    language. All language/path decisions are driven by configs/datasets.yaml.
+
+    Returns a dict mapping split key → Path.
     """
-    cfg_ds = load_config("datasets")
-    raw_dir = resolve_path(cfg_ds["multitude_v3"]["csv_path"]).parent
-    processed_cfg = cfg_ds["processed"]
+    cfg_ds = load_config("datasets")["multitude_v3"]
+    raw_dir       = resolve_path(cfg_ds["csv_path"]).parent
+    languages     = cfg_ds["languages"]
+    train_langs   = cfg_ds["train_languages"]
+    processed_cfg = load_config("datasets")["processed"]
 
-    out_train  = resolve_path(processed_cfg["train_en"])
-    out_test_en = resolve_path(processed_cfg["test_en"])
-    out_test_de = resolve_path(processed_cfg["test_de"])
+    out_train = resolve_path(processed_cfg["train_pooled"])
+    out_tests = {
+        lang: resolve_path(processed_cfg["test_template"].replace("{lang}", lang))
+        for lang in languages
+    }
+    all_outputs = [out_train, *out_tests.values()]
 
-    if all(p.exists() for p in [out_train, out_test_en, out_test_de]) and not force:
+    if all(p.exists() for p in all_outputs) and not force:
         logger.info("Processed files already exist — skipping preprocessing.")
-        return {"train_en": out_train, "test_en": out_test_en, "test_de": out_test_de}
+        return {"train_pooled": out_train, **{f"test_{l}": p for l, p in out_tests.items()}}
 
     out_train.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Loading MultiTuDe v3 cached splits …")
-    train_df   = _unify_multitude_v3(pd.read_parquet(raw_dir / "train_en.parquet"), "en")
-    test_en_df = _unify_multitude_v3(pd.read_parquet(raw_dir / "test_en.parquet"),  "en")
-    test_de_df = _unify_multitude_v3(pd.read_parquet(raw_dir / "test_de.parquet"),  "de")
+    # Load and clean test sets for all languages
+    test_dfs: dict[str, pd.DataFrame] = {}
+    for lang in languages:
+        df = _clean_df(deduplicate(_load_split(raw_dir, "test", lang)), f"test_{lang}")
+        _log_generator_counts(f"test_{lang}", df)
+        test_dfs[lang] = df
 
-    train_df   = _clean_df(deduplicate(train_df),   "train_en")
-    test_en_df = _clean_df(deduplicate(test_en_df), "test_en")
-    test_de_df = _clean_df(deduplicate(test_de_df), "test_de")
+    # Load, clean, and pool training sets
+    train_parts: list[pd.DataFrame] = []
+    for lang in train_langs:
+        df = _clean_df(deduplicate(_load_split(raw_dir, "train", lang)), f"train_{lang}")
+        _log_generator_counts(f"train_{lang}", df)
+        train_parts.append(df)
 
-    check_no_leakage(train_df, test_en_df, test_de_df,
-                     test_names=["test_en", "test_de"])
+    train_df = pd.concat(train_parts, ignore_index=True)
+    expected_pool = sum(len(p) for p in train_parts)
+    assert len(train_df) == expected_pool, (
+        f"Pooled row count {len(train_df)} != sum of parts {expected_pool}"
+    )
+    logger.info("Pooled training set: %d rows across %s", len(train_df), train_langs)
 
-    _log_generator_counts("train_en", train_df)
-    _log_generator_counts("test_en",  test_en_df)
-    _log_generator_counts("test_de",  test_de_df)
+    # Leakage check — pooled train vs every test
+    check_no_leakage(
+        train_df,
+        *[test_dfs[lang] for lang in languages],
+        test_names=[f"test_{lang}" for lang in languages],
+    )
 
     logger.info("Writing processed files …")
-    train_df.to_parquet(out_train,    index=False)
-    test_en_df.to_parquet(out_test_en, index=False)
-    test_de_df.to_parquet(out_test_de, index=False)
+    train_df.to_parquet(out_train, index=False)
+    for lang, df in test_dfs.items():
+        df.to_parquet(out_tests[lang], index=False)
 
-    logger.info("train_en: %d rows", len(train_df))
-    logger.info("test_en:  %d rows", len(test_en_df))
-    logger.info("test_de:  %d rows", len(test_de_df))
+    logger.info("train_pooled: %d rows", len(train_df))
+    for lang, df in test_dfs.items():
+        logger.info("test_%s:     %d rows", lang, len(df))
 
-    return {"train_en": out_train, "test_en": out_test_en, "test_de": out_test_de}
+    return {"train_pooled": out_train, **{f"test_{l}": p for l, p in out_tests.items()}}
 
 
 if __name__ == "__main__":

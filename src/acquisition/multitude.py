@@ -1,21 +1,17 @@
 """
-Load MultiTuDe v3 from the local CSV file.
+Load MultiTuDe v3 splits from the local CSV file.
 
-multitude_v3_clean.csv is a single flat file with columns:
-  text, label (0/1), multi_label (generator name or "human"),
-  split ("train"/"test"), language ("en"/"de"), length, source.
+multitude_v3_clean.csv is a single flat file. This script filters to every
+language listed in configs/datasets.yaml (multitude_v3.languages) and caches
+each train/test split as a parquet file.
 
-This script filters to English and German, caches each split as a parquet
-file under data/raw/multitude_v3/, and validates row counts and generator
-counts against the confirmed figures from Macko et al., 2025.
+Adding a new language requires only adding its code to `languages` and its
+expected row counts to `expected_rows` in configs/datasets.yaml — no code change.
 
-Cached outputs:
-  data/raw/multitude_v3/train_en.parquet   (7,954 rows)
-  data/raw/multitude_v3/test_en.parquet    (2,384 rows)
-  data/raw/multitude_v3/train_de.parquet   (7,951 rows — reserved for Month 3)
-  data/raw/multitude_v3/test_de.parquet    (2,388 rows)
+Cached output layout (one file per language per split):
+  data/raw/multitude_v3/train_{lang}.parquet
+  data/raw/multitude_v3/test_{lang}.parquet
 """
-import json
 import logging
 from pathlib import Path
 
@@ -26,41 +22,48 @@ from src.config import load_config, resolve_path
 logger = logging.getLogger(__name__)
 
 
-def _validate_split(name: str, df: pd.DataFrame,
+def _validate_split(key: str, df: pd.DataFrame,
                     expected_rows: int, expected_generators: int) -> None:
     actual = len(df)
     if actual != expected_rows:
         raise ValueError(
-            f"MultiTuDe v3 {name}: expected {expected_rows} rows, got {actual}."
+            f"MultiTuDe v3 {key}: expected {expected_rows} rows, got {actual}."
         )
-    n_generators = df["generator"].nunique()
-    if n_generators != expected_generators:
+    n_gen = df["generator"].nunique()
+    if n_gen != expected_generators:
         raise ValueError(
-            f"MultiTuDe v3 {name}: expected {expected_generators} distinct "
-            f"generator values, got {n_generators}: {sorted(df['generator'].unique())}"
+            f"MultiTuDe v3 {key}: expected {expected_generators} generators, "
+            f"got {n_gen}: {sorted(df['generator'].unique())}"
         )
-    logger.info("  %s: %d rows, %d generators ✓", name, actual, n_generators)
+    logger.info("  %s: %d rows, %d generators ✓", key, actual, n_gen)
     for gen, count in df["generator"].value_counts().items():
         logger.info("    %-30s %d", gen, count)
 
 
 def load(force: bool = False) -> dict[str, Path]:
     """
-    Filter and cache all four MultiTuDe v3 splits.
+    Filter and cache all configured language splits from the v3 CSV.
 
-    Returns a dict mapping split name → absolute Path to the cached parquet.
+    Returns a dict mapping "{split}_{lang}" → absolute Path to cached parquet.
     Reads from cache on subsequent calls unless force=True.
+
+    Adding a new language: add its code to `languages` and its expected row
+    counts to `expected_rows` in configs/datasets.yaml — this function needs
+    no changes.
     """
     cfg = load_config("datasets")["multitude_v3"]
     csv_path = resolve_path(cfg["csv_path"])
     raw_dir = csv_path.parent
     raw_dir.mkdir(parents=True, exist_ok=True)
 
+    languages         = cfg["languages"]
+    expected_rows_cfg = cfg["expected_rows"]
+    expected_generators = cfg["expected_generators"]
+
     out_paths: dict[str, Path] = {
-        "train_en": raw_dir / "train_en.parquet",
-        "test_en":  raw_dir / "test_en.parquet",
-        "train_de": raw_dir / "train_de.parquet",
-        "test_de":  raw_dir / "test_de.parquet",
+        f"{split}_{lang}": raw_dir / f"{split}_{lang}.parquet"
+        for lang in languages
+        for split in ("train", "test")
     }
 
     if all(p.exists() for p in out_paths.values()) and not force:
@@ -70,46 +73,34 @@ def load(force: bool = False) -> dict[str, Path]:
     if not csv_path.exists():
         raise FileNotFoundError(
             f"MultiTuDe v3 CSV not found: {csv_path}\n"
-            f"Place multitude_v3_clean.csv under data/raw/multitude_v3/ "
-            f"and update multitude_v3.csv_path in configs/datasets.yaml if needed."
+            f"Place multitude_v3_clean.csv under data/raw/multitude_v3/."
         )
 
     logger.info("Reading %s …", csv_path)
     df = pd.read_csv(csv_path)
-
-    text_col      = cfg["text_col"]
-    label_col     = cfg["label_col"]
-    generator_col = cfg["generator_col"]
-    split_col     = cfg["split_col"]
-    language_col  = cfg["language_col"]
-
-    # Rename to canonical names used throughout the pipeline
     df = df.rename(columns={
-        text_col:      "text",
-        label_col:     "label",
-        generator_col: "generator",
-        split_col:     "split",
-        language_col:  "language",
+        cfg["text_col"]:      "text",
+        cfg["label_col"]:     "label",
+        cfg["generator_col"]: "generator",
+        cfg["split_col"]:     "split",
+        cfg["language_col"]:  "language",
     })
     df["label"] = df["label"].astype(int)
 
-    expected_rows       = cfg["expected_rows"]
-    expected_generators = cfg["expected_generators"]
+    for lang in languages:
+        for split in ("train", "test"):
+            key = f"{split}_{lang}"
+            logger.info("Processing %s …", key)
+            subset = df[
+                (df["language"] == lang) & (df["split"] == split)
+            ].copy().reset_index(drop=True)
 
-    split_map = {
-        "train_en": ("en", "train"),
-        "test_en":  ("en", "test"),
-        "train_de": ("de", "train"),
-        "test_de":  ("de", "test"),
-    }
-
-    for split_name, (lang, split_val) in split_map.items():
-        logger.info("Processing %s …", split_name)
-        subset = df[(df["language"] == lang) & (df["split"] == split_val)].copy()
-        subset = subset.reset_index(drop=True)
-        _validate_split(split_name, subset,
-                        expected_rows[split_name], expected_generators)
-        subset.to_parquet(out_paths[split_name], index=False)
+            _validate_split(
+                key, subset,
+                expected_rows_cfg[lang][split],
+                expected_generators,
+            )
+            subset.to_parquet(out_paths[key], index=False)
 
     logger.info("All splits cached under %s", raw_dir)
     return out_paths

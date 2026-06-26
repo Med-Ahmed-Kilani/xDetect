@@ -1,16 +1,28 @@
 multitude_v3:
-  # Single flat CSV already on disk — place it at the path below.
+  # Single flat CSV already on disk.
   # Columns: text, label (0=human/1=machine), multi_label (generator name or
-  # "human"), split ("train"/"test"), language ("en"/"de"), length, source.
+  # "human"), split ("train"/"test"), language ("en"/"de"/"ar"/...), length, source.
   csv_path: "data/raw/multitude_v3/multitude_v3_clean.csv"
 
-  # Confirmed real row counts (Macko et al., 2025).
-  # The acquisition script asserts these exactly so a wrong file is caught early.
+  # Languages to acquire (train + test splits cached for each).
+  # Adding a new language requires only adding its code here and to expected_rows.
+  languages: ["en", "de", "ar"]
+
+  # Languages whose training splits are pooled into the combined training set.
+  train_languages: ["en", "de", "ar"]
+
+  # Confirmed row counts per language (Macko et al., 2025).
+  # Acquisition asserts these exactly so a wrong file is caught immediately.
   expected_rows:
-    train_en: 7954
-    test_en:  2384
-    train_de: 7951
-    test_de:  2388
+    en:
+      train: 7954
+      test:  2384
+    de:
+      train: 7951
+      test:  2388
+    ar:
+      train: 7975
+      test:  2392
   expected_generators: 8   # human + 7 LLMs per split
 
   # Column names in the CSV
@@ -18,25 +30,24 @@ multitude_v3:
   label_col:     "label"       # 0=human, 1=machine
   generator_col: "multi_label" # generator name or "human"
   split_col:     "split"       # "train" or "test"
-  language_col:  "language"    # "en" or "de"
+  language_col:  "language"    # language code
 
 hc3:
   # DEFERRED — reserved for an optional Month 4 robustness check.
-  # Not called from run_pipeline.py; kept here for documentation only.
   hf_id: "Hello-SimpleAI/HC3"
   config: "all"
   expected_human_min: 20000
   expected_machine_min: 24000
 
 processed:
-  train_en: "data/processed/train_en.parquet"
-  test_en:  "data/processed/test_en.parquet"
-  test_de:  "data/processed/test_de.parquet"
+  # Paths use {lang} placeholder — resolved at runtime.
+  train_pooled: "data/processed/train_pooled.parquet"
+  test_template: "data/processed/test_{lang}.parquet"
 
 schema_cols:
   - text
   - label          # 0=human, 1=machine
-  - language       # "en" or "de"
+  - language       # language code ("en", "de", "ar")
   - source_dataset # "multitude_v3"
   - domain         # "news"
   - generator      # model name or "human"
