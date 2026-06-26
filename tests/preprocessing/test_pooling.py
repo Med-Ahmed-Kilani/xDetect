@@ -153,42 +153,115 @@ class TestDedupOnPooled:
 
 
 # ---------------------------------------------------------------------------
-# Regression: per-language train files contain only their own language
+# Regression: per-language train files produced by pipeline.run()
 # ---------------------------------------------------------------------------
+#
+# These tests call pipeline.run() against a small synthetic multi-language
+# dataset and assert on the actual parquet files it writes to disk.
+# They catch regressions in the real pipeline logic — not manually-constructed
+# DataFrames that bypass run() entirely.
+
+from unittest.mock import patch
+from pathlib import Path as _Path
+
+
+def _make_raw_split(raw_dir: _Path, split: str, lang: str, n: int) -> None:
+    """Write a minimal raw parquet as multitude.load() would produce it."""
+    global _LID
+    offset = _LID
+    _LID += n
+    df = pd.DataFrame({
+        "text":      [f"{lang}-{split}-raw-{offset + i} long enough to survive cleaning" for i in range(n)],
+        "label":     [i % 2 for i in range(n)],
+        "generator": [("human" if i % 2 == 0 else "gpt4") for i in range(n)],
+        "language":  [lang] * n,
+        "split":     [split] * n,
+    })
+    df.to_parquet(raw_dir / f"{split}_{lang}.parquet", index=False)
+
+
+def _pipeline_config(tmp_path: _Path, languages: list[str]) -> dict:
+    """Return a load_config-shaped dict pointing all paths at tmp_path."""
+    raw_dir  = tmp_path / "raw"
+    proc_dir = tmp_path / "processed"
+    return {
+        "multitude_v3": {
+            "csv_path":        str(raw_dir / "multitude_v3_clean.csv"),
+            "languages":       languages,
+            "train_languages": languages,
+        },
+        "processed": {
+            "train_pooled":   str(proc_dir / "train_pooled.parquet"),
+            "train_template": str(proc_dir / "train_{lang}.parquet"),
+            "test_template":  str(proc_dir / "test_{lang}.parquet"),
+        },
+    }
+
+
+def _run_pipeline(tmp_path: _Path, languages: list[str]) -> None:
+    """
+    Prepare raw splits under tmp_path, patch config/resolve_path, then
+    call pipeline.run(force=True) so it exercises the real write logic.
+    """
+    from src.preprocessing.pipeline import run
+
+    raw_dir  = tmp_path / "raw"
+    proc_dir = tmp_path / "processed"
+    raw_dir.mkdir()
+    proc_dir.mkdir()
+
+    for lang in languages:
+        _make_raw_split(raw_dir, "train", lang, n=20)
+        _make_raw_split(raw_dir, "test",  lang, n=8)
+
+    cfg = _pipeline_config(tmp_path, languages)
+
+    with patch("src.preprocessing.pipeline.load_config", return_value=cfg), \
+         patch("src.preprocessing.pipeline.resolve_path", side_effect=_Path):
+        run(force=True)
+
 
 class TestPerLanguageTrainFiles:
+    def test_train_en_written_by_run(self, tmp_path):
+        """pipeline.run() must create train_en.parquet on disk."""
+        _run_pipeline(tmp_path, ["en", "de", "ar"])
+        out = tmp_path / "processed" / "train_en.parquet"
+        assert out.exists(), "train_en.parquet was not written by pipeline.run()"
+
     def test_train_en_contains_only_english_rows(self, tmp_path):
         """
-        train_en.parquet must contain only rows where language == "en".
-        Guards against the Month 1 regression where run() stopped writing
-        per-language files and the Month 1 code path fell back to the pooled set.
+        train_en.parquet produced by pipeline.run() must contain only rows
+        where language == 'en'. Catches the regression where run() wrote
+        train_pooled (EN+DE+AR) instead of the per-language file.
         """
-        import pandas as pd
-
-        en = _part(30, "en")
-        de = _part(30, "de")
-        ar = _part(30, "ar")
-
-        # Simulate what pipeline.run() does: write per-language train files
-        train_en_path = tmp_path / "train_en.parquet"
-        en.to_parquet(train_en_path, index=False)
-
-        loaded = pd.read_parquet(train_en_path)
-        assert (loaded["language"] == "en").all(), (
+        _run_pipeline(tmp_path, ["en", "de", "ar"])
+        out = pd.read_parquet(tmp_path / "processed" / "train_en.parquet")
+        assert (out["language"] == "en").all(), (
             "train_en.parquet contains non-English rows — "
             "pipeline.run() may be writing the pooled set instead."
         )
-        assert len(loaded) == 30
 
     def test_per_language_files_are_disjoint(self, tmp_path):
-        """No text from train_de or train_ar should appear in train_en."""
-        en = _part(20, "en")
-        de = _part(20, "de")
-        ar = _part(20, "ar")
+        """Texts in train_en must not appear in train_de or train_ar."""
+        _run_pipeline(tmp_path, ["en", "de", "ar"])
+        proc = tmp_path / "processed"
+        en_texts = set(pd.read_parquet(proc / "train_en.parquet")["text"])
+        de_texts = set(pd.read_parquet(proc / "train_de.parquet")["text"])
+        ar_texts = set(pd.read_parquet(proc / "train_ar.parquet")["text"])
+        assert en_texts.isdisjoint(de_texts), "train_en and train_de share texts"
+        assert en_texts.isdisjoint(ar_texts), "train_en and train_ar share texts"
 
-        en_texts = set(en["text"])
-        de_texts = set(de["text"])
-        ar_texts = set(ar["text"])
+    def test_train_en_row_count_matches_raw_input(self, tmp_path):
+        """train_en.parquet row count must equal the raw EN train split (20 rows)."""
+        _run_pipeline(tmp_path, ["en", "de", "ar"])
+        out = pd.read_parquet(tmp_path / "processed" / "train_en.parquet")
+        assert len(out) == 20
 
-        assert en_texts.isdisjoint(de_texts), "EN and DE training texts overlap"
-        assert en_texts.isdisjoint(ar_texts), "EN and AR training texts overlap"
+    def test_all_per_language_files_written(self, tmp_path):
+        """run() must write train_{lang}.parquet for every configured language."""
+        _run_pipeline(tmp_path, ["en", "de", "ar"])
+        proc = tmp_path / "processed"
+        for lang in ("en", "de", "ar"):
+            assert (proc / f"train_{lang}.parquet").exists(), (
+                f"train_{lang}.parquet missing from pipeline output"
+            )
