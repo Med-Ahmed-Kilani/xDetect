@@ -59,6 +59,9 @@ mdeberta_v3_base:
   weight_decay: 0.01
   seed: 42
   fp16: false      # mDeBERTa-v3 model card: fp16 training not supported
+  # adam_epsilon: 1.0e-6  # fallback if grad-clip alone doesn't stabilise training;
+  #                       # DeBERTa-v3 fine-tuning literature recommends 1e-6 vs
+  #                       # PyTorch AdamW default of 1e-8 for this model family
   checkpoint_dir: "data/checkpoints/mdeberta_v3_base"
 
 eval:

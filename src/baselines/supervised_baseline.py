@@ -74,6 +74,7 @@ class SupervisedBaseline:
         self.seed = cfg["seed"]
         self.checkpoint_dir = resolve_path(cfg["checkpoint_dir"])
         self.fp16 = cfg.get("fp16", False)
+        self.adam_epsilon = cfg.get("adam_epsilon", 1e-8)
 
         _set_seed(self.seed)
 
@@ -112,7 +113,8 @@ class SupervisedBaseline:
         model.to(self.device)
 
         optimizer = torch.optim.AdamW(
-            model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+            model.parameters(), lr=self.lr, weight_decay=self.weight_decay,
+            eps=self.adam_epsilon,
         )
         total_steps = len(loader) * self.num_epochs
         warmup_steps = int(total_steps * self.warmup_ratio)
@@ -130,7 +132,13 @@ class SupervisedBaseline:
                 optimizer.zero_grad()
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 out = model(**batch)
+                if torch.isnan(out.loss) or torch.isinf(out.loss):
+                    raise RuntimeError(
+                        f"Loss is {out.loss.item()} at epoch {epoch + 1}, "
+                        f"batch {progress.n} — aborting to avoid wasting GPU time."
+                    )
                 out.loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 scheduler.step()
                 total_loss += out.loss.item()
