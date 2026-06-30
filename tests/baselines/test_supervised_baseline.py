@@ -7,6 +7,8 @@ Tests for training-loop safety guards in SupervisedBaseline:
 No real model weights are downloaded; the model forward pass is mocked.
 """
 import contextlib
+import json
+from pathlib import Path
 
 import torch
 import pytest
@@ -100,7 +102,10 @@ def _train_ctx(cfg, loss_values, train_path, extra_patches=()):
             return_value=sched_mock))
         stack.enter_context(patch(
             "src.baselines.supervised_baseline.resolve_path", side_effect=lambda p: p))
-        stack.enter_context(patch("pathlib.Path.mkdir"))
+        # Non-resume tests don't exercise checkpointing; mock it out entirely
+        # so these tests don't depend on the checkpoint dir existing on disk.
+        stack.enter_context(patch(
+            "src.baselines.supervised_baseline.SupervisedBaseline._save_epoch"))
         extra_mocks = [stack.enter_context(p) for p in extra_patches]
 
         p_tok.from_pretrained.return_value   = tok_mock
@@ -272,3 +277,169 @@ class TestAdamEpsilon:
         assert captured_eps == [1e-6], (
             f"Expected AdamW to receive eps=1e-6, got: {captured_eps}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Resume from checkpoint
+# ---------------------------------------------------------------------------
+#
+# The resume tests write real training_state.json / optimizer.pt / scheduler.pt
+# files into tmp_path before calling train(), rather than mocking torch.load.
+# This exercises the actual file-read path used during a real resume.
+# torch.save is mocked to avoid pickling MagicMock state dicts.
+
+def _setup_checkpoint(ckpt_dir: Path, epoch_completed: int, num_epochs: int) -> None:
+    """Write the three files that a mid-run checkpoint produces."""
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    (ckpt_dir / "training_state.json").write_text(
+        json.dumps({"epoch_completed": epoch_completed, "num_epochs": num_epochs})
+    )
+    # Empty dicts are valid state for mocked optimizer/scheduler load_state_dict calls
+    torch.save({}, ckpt_dir / "optimizer.pt")
+    torch.save({}, ckpt_dir / "scheduler.pt")
+
+
+class TestResumeFromCheckpoint:
+    def _make_resume_ctx(self, ckpt_dir: Path, forward_calls: list[int]):
+        """
+        Build an ExitStack that patches all external dependencies for a resume
+        test.  forward_calls is a mutable list[int] that accumulates one count
+        per model forward pass, letting the test assert how many epochs ran.
+
+        Key differences from _train_ctx:
+        - resolve_path is NOT patched (baseline already constructed with real Path)
+        - Path.mkdir is NOT patched (ckpt_dir already exists)
+        - torch.save IS patched (prevents pickling MagicMock state dicts)
+        - torch.optim.AdamW IS patched (load_state_dict needs to accept {})
+        """
+        def counting_forward(**_batch):
+            forward_calls[0] += 1
+            out = MagicMock()
+            out.loss = torch.tensor(0.5, requires_grad=True)
+            return out
+
+        model_mock = MagicMock()
+        model_mock.side_effect = counting_forward
+        model_mock.parameters.return_value = [torch.zeros(3, requires_grad=True)]
+        model_mock.train = MagicMock()
+        model_mock.save_pretrained = MagicMock()
+
+        tok_mock = _make_tok_mock()
+        sched_mock = MagicMock()
+        adamw_mock = MagicMock()
+
+        stack = contextlib.ExitStack()
+        p_tok   = stack.enter_context(patch("src.baselines.supervised_baseline.AutoTokenizer"))
+        p_model = stack.enter_context(patch("src.baselines.supervised_baseline.AutoModelForSequenceClassification"))
+        stack.enter_context(patch("src.baselines.supervised_baseline.get_linear_schedule_with_warmup",
+                                  return_value=sched_mock))
+        stack.enter_context(patch("torch.optim.AdamW", return_value=adamw_mock))
+        stack.enter_context(patch("torch.save"))   # prevent pickling MagicMock state dicts
+
+        p_tok.from_pretrained.return_value   = tok_mock
+        p_model.from_pretrained.return_value = model_mock
+
+        return stack
+
+    def test_resumes_from_correct_epoch_not_epoch_0(self, tmp_path):
+        """
+        After an interruption at epoch 1 of a 3-epoch run, a fresh
+        SupervisedBaseline must resume from epoch 2, not epoch 0.
+
+        Verification: count model forward passes.
+          - 8 samples, batch_size 4 → 2 batches per epoch
+          - If resumed correctly (2 remaining epochs): 2 × 2 = 4 forward calls
+          - If started from scratch (3 epochs):        3 × 2 = 6 forward calls
+        """
+        from src.baselines.supervised_baseline import SupervisedBaseline
+
+        ckpt_dir = tmp_path / "ckpt"
+        _setup_checkpoint(ckpt_dir, epoch_completed=1, num_epochs=3)
+
+        cfg = {**_BASE_CFG, "num_epochs": 3, "checkpoint_dir": str(ckpt_dir)}
+        baseline = SupervisedBaseline(cfg=cfg)
+        train_path = _fake_train_parquet(tmp_path, n=8)
+
+        forward_calls = [0]
+        with self._make_resume_ctx(ckpt_dir, forward_calls):
+            baseline.train(train_path)
+
+        batches_per_epoch = 8 // 4
+        expected = batches_per_epoch * 2   # 2 remaining epochs
+        assert forward_calls[0] == expected, (
+            f"Expected {expected} forward calls (2 resumed epochs × {batches_per_epoch} batches), "
+            f"got {forward_calls[0]} — training may have started from epoch 0 instead of epoch 2"
+        )
+
+    def test_skips_training_if_all_epochs_complete(self, tmp_path):
+        """
+        If training_state.json records epoch_completed == num_epochs, train()
+        must return the checkpoint path immediately without running any batches.
+        """
+        from src.baselines.supervised_baseline import SupervisedBaseline
+
+        ckpt_dir = tmp_path / "ckpt"
+        _setup_checkpoint(ckpt_dir, epoch_completed=3, num_epochs=3)
+
+        cfg = {**_BASE_CFG, "num_epochs": 3, "checkpoint_dir": str(ckpt_dir)}
+        baseline = SupervisedBaseline(cfg=cfg)
+        train_path = _fake_train_parquet(tmp_path, n=8)
+
+        forward_calls = [0]
+        with self._make_resume_ctx(ckpt_dir, forward_calls):
+            result = baseline.train(train_path)
+
+        assert forward_calls[0] == 0, (
+            f"Expected 0 forward calls (all epochs done), got {forward_calls[0]}"
+        )
+        assert result == ckpt_dir
+
+    def test_epoch_state_written_after_each_epoch(self, tmp_path):
+        """
+        After each epoch, training_state.json must record the epoch count
+        completed so far, so an interruption between epoch N and N+1 leaves
+        a consistent state.
+        """
+        from src.baselines.supervised_baseline import SupervisedBaseline
+
+        ckpt_dir = tmp_path / "ckpt"
+        cfg = {**_BASE_CFG, "num_epochs": 2, "checkpoint_dir": str(ckpt_dir)}
+        baseline = SupervisedBaseline(cfg=cfg)
+        train_path = _fake_train_parquet(tmp_path, n=4)
+
+        forward_calls = [0]
+        # Allow real writes to ckpt_dir (don't patch torch.save globally here;
+        # use mock state dicts that are picklable — empty dicts are fine for
+        # mocked optimizer/scheduler).
+        with contextlib.ExitStack() as stack:
+            p_tok   = stack.enter_context(patch("src.baselines.supervised_baseline.AutoTokenizer"))
+            p_model = stack.enter_context(patch("src.baselines.supervised_baseline.AutoModelForSequenceClassification"))
+            sched_mock = MagicMock()
+            sched_mock.state_dict.return_value = {}   # picklable
+            stack.enter_context(patch("src.baselines.supervised_baseline.get_linear_schedule_with_warmup",
+                                      return_value=sched_mock))
+            adamw_mock = MagicMock()
+            adamw_mock.state_dict.return_value = {}   # picklable
+            stack.enter_context(patch("torch.optim.AdamW", return_value=adamw_mock))
+
+            tok_mock = _make_tok_mock()
+            p_tok.from_pretrained.return_value = tok_mock
+
+            def counting_forward(**__):
+                forward_calls[0] += 1
+                out = MagicMock()
+                out.loss = torch.tensor(0.4, requires_grad=True)
+                return out
+
+            model_mock = MagicMock()
+            model_mock.side_effect = counting_forward
+            model_mock.parameters.return_value = [torch.zeros(3, requires_grad=True)]
+            model_mock.train = MagicMock()
+            model_mock.save_pretrained = MagicMock()
+            p_model.from_pretrained.return_value = model_mock
+
+            baseline.train(train_path)
+
+        state = json.loads((ckpt_dir / "training_state.json").read_text())
+        assert state["epoch_completed"] == 2
+        assert state["num_epochs"] == 2
