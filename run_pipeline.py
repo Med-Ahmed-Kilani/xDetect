@@ -20,6 +20,8 @@ here — it is reserved for an optional Month 4 robustness check.
 Usage:
     python run_pipeline.py [--force] [--skip-acquisition] [--skip-train]
     python run_pipeline.py --backbone [--force] [--skip-acquisition]
+    python run_pipeline.py --backbone --only mdeberta_v3_base [--force]
+    python run_pipeline.py --backbone --skip-training
 """
 import argparse
 import logging
@@ -41,6 +43,12 @@ def main() -> None:
                         help="Skip training (assume checkpoints exist)")
     parser.add_argument("--backbone", action="store_true",
                         help="Run Month 2 backbone comparison (mBERT/XLM-R/mDeBERTa)")
+    parser.add_argument("--only", metavar="MODEL_KEY",
+                        help="(--backbone) Train and evaluate only this backbone key "
+                             "(mbert | xlmr_base | mdeberta_v3_base); skip the others")
+    parser.add_argument("--skip-training", action="store_true",
+                        help="(--backbone) Skip all training; go straight to comparison "
+                             "report generation using existing checkpoints")
     args = parser.parse_args()
 
     # Step 1 — Filter and cache MultiTuDe v3 splits (all configured languages)
@@ -85,16 +93,20 @@ def main() -> None:
 
     else:
         # Month 2 path: multilingual backbone comparison ---------------------
+        from src.config import resolve_path
 
-        # Steps 6–7 — Train + evaluate all three backbones
-        if not args.skip_train:
-            logger.info("=== Steps 6–7: Backbone training + evaluation ===")
-            from src.baselines.backbone_trainer import run as run_backbone
-            comparison_json = run_backbone(force=args.force)
-        else:
-            logger.info("Skipping backbone training.")
-            from src.config import resolve_path
+        if args.skip_training:
+            # Skip all training; go straight to report with existing checkpoints
+            logger.info("Skipping backbone training (--skip-training).")
             comparison_json = resolve_path("reports/backbone_comparison.json")
+        else:
+            only = args.only or None
+            if only:
+                logger.info("=== Steps 6–7: Training + evaluating backbone '%s' only ===", only)
+            else:
+                logger.info("=== Steps 6–7: Backbone training + evaluation ===")
+            from src.baselines.backbone_trainer import run as run_backbone
+            comparison_json = run_backbone(force=args.force, only=only)
 
         # Step 8 — Backbone comparison report
         logger.info("=== Step 8: Generating backbone comparison report ===")
