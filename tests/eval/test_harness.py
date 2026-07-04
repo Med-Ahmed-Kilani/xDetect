@@ -12,7 +12,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.eval.harness import _eval_split, _flag_suspicious, _write_summary
+import torch
+
+from src.eval.harness import _eval_split, _flag_suspicious, _write_summary, evaluate_checkpoint
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +120,124 @@ class TestFlagSuspicious:
 # ---------------------------------------------------------------------------
 # _write_summary
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# evaluate_checkpoint (Month 3 adapter/full-checkpoint eval extension)
+# ---------------------------------------------------------------------------
+
+def _proba_to_logits(proba: list[float]) -> torch.Tensor:
+    """Build 2-class logits whose softmax reproduces `proba` for class 1 exactly."""
+    p = torch.tensor(proba, dtype=torch.float32)
+    logit_1 = torch.log(p / (1 - p))
+    logit_0 = torch.zeros_like(logit_1)
+    return torch.stack([logit_0, logit_1], dim=1)
+
+
+def _make_eval_test_parquet(tmp_path) -> tuple[str, np.ndarray, np.ndarray]:
+    labels = [0, 1, 0, 1, 0, 1, 0, 1]
+    generators = ["human", "gpt", "human", "gpt", "human", "gpt", "human", "gpt"]
+    df = pd.DataFrame({
+        "text": [f"sample text {i}" for i in range(8)],
+        "label": labels,
+        "generator": generators,
+    })
+    path = tmp_path / "test_de.parquet"
+    df.to_parquet(path, index=False)
+    return str(path), np.array(labels), np.array(generators)
+
+
+def _make_harness_tok_mock():
+    tok = MagicMock()
+    tok.side_effect = lambda texts, **kw: {
+        "input_ids": torch.zeros(len(texts), 8, dtype=torch.long),
+        "attention_mask": torch.ones(len(texts), 8, dtype=torch.long),
+    }
+    return tok
+
+
+class TestEvaluateCheckpointFull:
+    def test_matches_manually_computed_metrics(self, tmp_path):
+        """
+        Regression check for the harness extension: given fixed logits, the
+        metrics evaluate_checkpoint returns must equal sklearn computed
+        directly on the same proba/preds/labels — proving the new code path
+        doesn't corrupt the existing metric computation.
+        """
+        from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+
+        test_path, labels, generators = _make_eval_test_parquet(tmp_path)
+        proba = [0.1, 0.9, 0.2, 0.8, 0.6, 0.4, 0.3, 0.7]
+
+        model_mock = MagicMock()
+        model_mock.side_effect = lambda **batch: MagicMock(logits=_proba_to_logits(proba))
+        model_mock.to = MagicMock(return_value=model_mock)
+        model_mock.eval = MagicMock()
+
+        tok_mock = _make_harness_tok_mock()
+
+        with patch("src.eval.harness.AutoModelForSequenceClassification") as p_model, \
+             patch("src.eval.harness.AutoTokenizer") as p_tok:
+            p_model.from_pretrained.return_value = model_mock
+            p_tok.from_pretrained.return_value = tok_mock
+
+            result = evaluate_checkpoint(
+                checkpoint_path="fake/checkpoint", test_parquet=test_path, is_adapter=False,
+            )
+
+        preds = (np.array(proba) >= 0.5).astype(int)
+        assert result["overall"]["accuracy"] == pytest.approx(accuracy_score(labels, preds))
+        assert result["overall"]["f1"] == pytest.approx(f1_score(labels, preds))
+        assert result["overall"]["auroc"] == pytest.approx(roc_auc_score(labels, proba))
+        assert set(result["per_generator"].keys()) == set(generators.tolist())
+
+    def test_loads_checkpoint_directly_without_backbone(self, tmp_path):
+        test_path, _, _ = _make_eval_test_parquet(tmp_path)
+        model_mock = MagicMock()
+        model_mock.side_effect = lambda **batch: MagicMock(
+            logits=_proba_to_logits([0.5] * 8)
+        )
+        model_mock.to = MagicMock(return_value=model_mock)
+
+        with patch("src.eval.harness.AutoModelForSequenceClassification") as p_model, \
+             patch("src.eval.harness.AutoTokenizer") as p_tok:
+            p_model.from_pretrained.return_value = model_mock
+            p_tok.from_pretrained.return_value = _make_harness_tok_mock()
+
+            evaluate_checkpoint(checkpoint_path="some/ckpt", test_parquet=test_path)
+
+            p_model.from_pretrained.assert_called_once_with("some/ckpt", num_labels=2)
+
+
+class TestEvaluateCheckpointAdapter:
+    def test_requires_backbone_path(self, tmp_path):
+        test_path, _, _ = _make_eval_test_parquet(tmp_path)
+        with pytest.raises(ValueError, match="backbone_path"):
+            evaluate_checkpoint(
+                checkpoint_path="adapter/ckpt", test_parquet=test_path, is_adapter=True,
+            )
+
+    def test_loads_via_lora_adapter(self, tmp_path):
+        test_path, _, _ = _make_eval_test_parquet(tmp_path)
+        model_mock = MagicMock()
+        model_mock.side_effect = lambda **batch: MagicMock(
+            logits=_proba_to_logits([0.5] * 8)
+        )
+        model_mock.to = MagicMock(return_value=model_mock)
+
+        adapter_mock = MagicMock()
+        adapter_mock.model = model_mock
+        adapter_mock.tokenizer = _make_harness_tok_mock()
+
+        with patch("src.adapters.lora_adapter.LoRAAdapter", return_value=adapter_mock) as p_cls:
+            result = evaluate_checkpoint(
+                checkpoint_path="adapter/ckpt", test_parquet=test_path,
+                is_adapter=True, backbone_path="backbone/ckpt",
+            )
+
+        p_cls.assert_called_once_with("backbone/ckpt", num_labels=2)
+        adapter_mock.load.assert_called_once_with("adapter/ckpt")
+        assert "overall" in result
+
 
 class TestWriteSummary:
     def _make_report(self) -> dict:

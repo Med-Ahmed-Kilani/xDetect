@@ -14,10 +14,13 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+import torch
+from torch.utils.data import DataLoader
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from src.config import load_config, resolve_path
 from src.eval.metrics import compute_metrics, compute_per_generator
@@ -97,6 +100,75 @@ def _score_supervised(df: pd.DataFrame, ckpt: Path, force: bool) -> pd.DataFrame
     df["pred_label_sup"] = (proba >= 0.5).astype(int)
     df.to_parquet(cache, index=False)
     return df
+
+
+def _predict_proba_generic(model, tokenizer, texts: list[str],
+                           max_length: int, batch_size: int = 16) -> np.ndarray:
+    """Batch inference for any HF/PEFT sequence-classification model."""
+    from src.baselines.supervised_baseline import TextDataset
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+
+    dataset = TextDataset(texts, [0] * len(texts), tokenizer, max_length)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    all_probs = []
+    with torch.no_grad():
+        for batch in loader:
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            out = model(input_ids=input_ids, attention_mask=attention_mask)
+            probs = torch.softmax(out.logits, dim=-1)[:, 1].cpu().numpy()
+            all_probs.extend(probs)
+    return np.array(all_probs)
+
+
+def evaluate_checkpoint(
+    checkpoint_path: str | Path,
+    test_parquet: str | Path,
+    is_adapter: bool = False,
+    backbone_path: Optional[str | Path] = None,
+    num_labels: int = 2,
+    max_length: int = 512,
+) -> dict[str, Any]:
+    """
+    Evaluate any model checkpoint (Month 3 adapter or full model) on a test
+    parquet file, returning the same {overall, per_generator} metrics shape
+    used throughout the eval harness.
+
+    is_adapter=True loads checkpoint_path as a PEFT adapter on top of the
+    frozen backbone at backbone_path (required in that case), via
+    PeftModel.from_pretrained. is_adapter=False loads checkpoint_path
+    directly as a full model checkpoint — this is also the path used to
+    evaluate the frozen zero-shot backbone itself (no adapter loaded).
+    """
+    if is_adapter:
+        if backbone_path is None:
+            raise ValueError("backbone_path is required when is_adapter=True")
+        from src.adapters.lora_adapter import LoRAAdapter
+        adapter = LoRAAdapter(backbone_path, num_labels=num_labels)
+        adapter.load(checkpoint_path)
+        model, tokenizer = adapter.model, adapter.tokenizer
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            checkpoint_path, num_labels=num_labels
+        )
+
+    df = pd.read_parquet(test_parquet)
+    texts = df["text"].tolist()
+    labels = df["label"].to_numpy()
+    generators = df["generator"].to_numpy()
+
+    proba = _predict_proba_generic(model, tokenizer, texts, max_length)
+    preds = (proba >= 0.5).astype(int)
+
+    return {
+        "overall": compute_metrics(labels, preds, proba),
+        "per_generator": compute_per_generator(labels, preds, generators, proba),
+    }
 
 
 def _eval_split(

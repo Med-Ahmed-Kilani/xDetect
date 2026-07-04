@@ -18,6 +18,7 @@ dependencies = [
     "pyyaml>=6.0",
     "tqdm>=4.66",
     "numpy>=1.26",
+    "peft>=0.10.0",
 ]
 
 [project.optional-dependencies]
