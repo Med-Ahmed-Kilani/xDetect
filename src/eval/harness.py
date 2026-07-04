@@ -152,9 +152,9 @@ def evaluate_checkpoint(
         adapter.load(checkpoint_path)
         model, tokenizer = adapter.model, adapter.tokenizer
     else:
-        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, local_files_only=True)
         model = AutoModelForSequenceClassification.from_pretrained(
-            checkpoint_path, num_labels=num_labels
+            checkpoint_path, num_labels=num_labels, local_files_only=True
         )
 
     df = pd.read_parquet(test_parquet)

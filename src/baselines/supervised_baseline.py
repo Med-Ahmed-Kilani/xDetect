@@ -43,6 +43,17 @@ _OPTIMIZER_PT   = "optimizer.pt"
 _SCHEDULER_PT   = "scheduler.pt"
 
 
+def _local_files_only_kwarg(model_id_or_path) -> dict:
+    """
+    huggingface_hub validates repo ids and can reject an absolute local
+    checkpoint path (e.g. a warm-start checkpoint) as an invalid repo id.
+    model_id is either a real HF hub id ("xlm-roberta-base") or a local
+    checkpoint directory (warm start) — only the latter needs
+    local_files_only=True to signal "this is a path, not a hub lookup".
+    """
+    return {"local_files_only": True} if Path(str(model_id_or_path)).is_dir() else {}
+
+
 def _set_seed(seed: int) -> None:
     import random
     random.seed(seed)
@@ -103,7 +114,9 @@ class SupervisedBaseline:
 
     def _load_tokenizer(self) -> None:
         if self._tokenizer is None:
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self.model_id, **_local_files_only_kwarg(self.model_id)
+            )
 
     # ------------------------------------------------------------------
     # Internal checkpoint helpers
@@ -183,11 +196,12 @@ class SupervisedBaseline:
         # --- Model ---
         if start_epoch > 0:
             model = AutoModelForSequenceClassification.from_pretrained(
-                self.checkpoint_dir
+                self.checkpoint_dir, local_files_only=True
             )
         else:
             model = AutoModelForSequenceClassification.from_pretrained(
-                self.model_id, num_labels=self.num_labels
+                self.model_id, num_labels=self.num_labels,
+                **_local_files_only_kwarg(self.model_id)
             )
         model.to(self.device)
 
@@ -254,8 +268,10 @@ class SupervisedBaseline:
         """Load a saved checkpoint."""
         ckpt = resolve_path(str(checkpoint_dir)) if checkpoint_dir else self.checkpoint_dir
         logger.info("Loading checkpoint from %s …", ckpt)
-        self._tokenizer = AutoTokenizer.from_pretrained(ckpt)
-        self._model     = AutoModelForSequenceClassification.from_pretrained(ckpt)
+        self._tokenizer = AutoTokenizer.from_pretrained(ckpt, local_files_only=True)
+        self._model     = AutoModelForSequenceClassification.from_pretrained(
+            ckpt, local_files_only=True
+        )
         self._model.eval()
         self._model.to(self.device)
 

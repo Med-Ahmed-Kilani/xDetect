@@ -41,9 +41,9 @@ class LoRAAdapter:
     def build(self):
         """Load the frozen backbone and wrap it with a fresh LoRA adapter."""
         base = AutoModelForSequenceClassification.from_pretrained(
-            self.backbone_path, num_labels=self.num_labels
+            self.backbone_path, num_labels=self.num_labels, local_files_only=True
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(self.backbone_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.backbone_path, local_files_only=True)
         self.model = get_peft_model(base, self._lora_config())
         return self.model
 
@@ -67,8 +67,8 @@ class LoRAAdapter:
     def load(self, path: str | Path):
         """Load a previously saved adapter checkpoint onto the frozen backbone."""
         base = AutoModelForSequenceClassification.from_pretrained(
-            self.backbone_path, num_labels=self.num_labels
+            self.backbone_path, num_labels=self.num_labels, local_files_only=True
         )
         self.model = PeftModel.from_pretrained(base, str(path))
-        self.tokenizer = AutoTokenizer.from_pretrained(str(path))
+        self.tokenizer = AutoTokenizer.from_pretrained(str(path), local_files_only=True)
         return self.model

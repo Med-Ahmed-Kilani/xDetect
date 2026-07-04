@@ -7,6 +7,7 @@ weights. BERT's attention module uses the same query/key/value submodule
 naming as XLM-R/RoBERTa, so target_modules=["query", "value"] matches.
 """
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -84,3 +85,51 @@ class TestSaveLoadRoundTrip:
             loaded_logits = loaded.model(**fixed_input).logits
 
         assert torch.allclose(original_logits, loaded_logits, atol=1e-6)
+
+
+class TestLocalFilesOnly:
+    """
+    huggingface_hub validates repo ids and can reject an absolute local
+    checkpoint path as an invalid repo id — local_files_only=True tells it
+    this is a local path, not a hub lookup.
+    """
+
+    def test_build_passes_local_files_only_for_absolute_path(self, tmp_path):
+        abs_backbone_path = tmp_path / "xlmr_base_checkpoint"
+
+        with patch("src.adapters.lora_adapter.AutoModelForSequenceClassification") as p_model, \
+             patch("src.adapters.lora_adapter.AutoTokenizer") as p_tok, \
+             patch("src.adapters.lora_adapter.get_peft_model", return_value=MagicMock()):
+            p_model.from_pretrained.return_value = MagicMock()
+            p_tok.from_pretrained.return_value = MagicMock()
+
+            adapter = LoRAAdapter(abs_backbone_path, num_labels=2, cfg=_LORA_CFG)
+            adapter.build()
+
+            p_model.from_pretrained.assert_called_once_with(
+                abs_backbone_path, num_labels=2, local_files_only=True
+            )
+            p_tok.from_pretrained.assert_called_once_with(
+                abs_backbone_path, local_files_only=True
+            )
+
+    def test_load_passes_local_files_only_for_absolute_path(self, tmp_path):
+        abs_backbone_path = tmp_path / "xlmr_base_checkpoint"
+        abs_adapter_path = tmp_path / "adapter_ckpt"
+
+        with patch("src.adapters.lora_adapter.AutoModelForSequenceClassification") as p_model, \
+             patch("src.adapters.lora_adapter.AutoTokenizer") as p_tok, \
+             patch("src.adapters.lora_adapter.PeftModel") as p_peft:
+            p_model.from_pretrained.return_value = MagicMock()
+            p_tok.from_pretrained.return_value = MagicMock()
+            p_peft.from_pretrained.return_value = MagicMock()
+
+            adapter = LoRAAdapter(abs_backbone_path, num_labels=2, cfg=_LORA_CFG)
+            adapter.load(abs_adapter_path)
+
+            p_model.from_pretrained.assert_called_once_with(
+                abs_backbone_path, num_labels=2, local_files_only=True
+            )
+            p_tok.from_pretrained.assert_called_once_with(
+                str(abs_adapter_path), local_files_only=True
+            )

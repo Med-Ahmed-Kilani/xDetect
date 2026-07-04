@@ -443,3 +443,84 @@ class TestResumeFromCheckpoint:
         state = json.loads((ckpt_dir / "training_state.json").read_text())
         assert state["epoch_completed"] == 2
         assert state["num_epochs"] == 2
+
+
+# ---------------------------------------------------------------------------
+# local_files_only handling
+#
+# huggingface_hub validates repo ids and can reject an absolute local
+# checkpoint path (e.g. a warm-start checkpoint used by FullRetrainer) as an
+# invalid repo id — local_files_only=True tells it this is a local path, not
+# a hub lookup. Real hub ids (e.g. "xlm-roberta-base") must NOT get
+# local_files_only=True, or offline-cache-only loading would break normal
+# training runs.
+# ---------------------------------------------------------------------------
+
+class TestLocalFilesOnlyKwarg:
+    def test_hub_repo_id_gets_no_kwarg(self):
+        from src.baselines.supervised_baseline import _local_files_only_kwarg
+        assert _local_files_only_kwarg("xlm-roberta-base") == {}
+        assert _local_files_only_kwarg("microsoft/mdeberta-v3-base") == {}
+
+    def test_existing_local_dir_gets_local_files_only(self, tmp_path):
+        from src.baselines.supervised_baseline import _local_files_only_kwarg
+        local_dir = tmp_path / "xlmr_base_checkpoint"
+        local_dir.mkdir()
+        assert _local_files_only_kwarg(local_dir) == {"local_files_only": True}
+        assert _local_files_only_kwarg(str(local_dir)) == {"local_files_only": True}
+
+
+class TestLocalFilesOnlyLoad:
+    def test_load_passes_local_files_only_true(self, tmp_path):
+        from src.baselines.supervised_baseline import SupervisedBaseline
+
+        baseline = SupervisedBaseline(cfg=_BASE_CFG)
+        ckpt_dir = tmp_path / "ckpt"
+
+        with patch("src.baselines.supervised_baseline.AutoTokenizer") as p_tok, \
+             patch("src.baselines.supervised_baseline.AutoModelForSequenceClassification") as p_model, \
+             patch("src.baselines.supervised_baseline.resolve_path", side_effect=lambda p: p):
+            p_tok.from_pretrained.return_value = MagicMock()
+            p_model.from_pretrained.return_value = MagicMock()
+
+            baseline.load(ckpt_dir)
+
+            p_tok.from_pretrained.assert_called_once_with(str(ckpt_dir), local_files_only=True)
+            p_model.from_pretrained.assert_called_once_with(str(ckpt_dir), local_files_only=True)
+
+
+class TestLocalFilesOnlyTrain:
+    def test_warm_start_from_local_checkpoint_passes_local_files_only(self, tmp_path):
+        """FullRetrainer sets model_id to an existing local checkpoint dir (warm start)."""
+        from src.baselines.supervised_baseline import SupervisedBaseline
+
+        backbone_dir = tmp_path / "xlmr_base_checkpoint"
+        backbone_dir.mkdir()
+        cfg = {**_BASE_CFG, "model_id": str(backbone_dir)}
+        baseline = SupervisedBaseline(cfg=cfg)
+        train_path = _fake_train_parquet(tmp_path)
+
+        with _train_ctx(cfg, [0.5], train_path) as mocks:
+            baseline.train(train_path)
+
+        mocks["tok_cls"].from_pretrained.assert_called_once_with(
+            str(backbone_dir), local_files_only=True
+        )
+        mocks["model_cls"].from_pretrained.assert_called_once_with(
+            str(backbone_dir), num_labels=_BASE_CFG["num_labels"], local_files_only=True
+        )
+
+    def test_hub_model_id_does_not_pass_local_files_only(self, tmp_path):
+        """A real HF hub id (e.g. "roberta-base") must not get local_files_only=True."""
+        from src.baselines.supervised_baseline import SupervisedBaseline
+
+        baseline = SupervisedBaseline(cfg=_BASE_CFG)
+        train_path = _fake_train_parquet(tmp_path)
+
+        with _train_ctx(_BASE_CFG, [0.5], train_path) as mocks:
+            baseline.train(train_path)
+
+        mocks["tok_cls"].from_pretrained.assert_called_once_with(_BASE_CFG["model_id"])
+        mocks["model_cls"].from_pretrained.assert_called_once_with(
+            _BASE_CFG["model_id"], num_labels=_BASE_CFG["num_labels"]
+        )

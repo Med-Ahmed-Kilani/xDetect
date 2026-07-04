@@ -205,7 +205,36 @@ class TestEvaluateCheckpointFull:
 
             evaluate_checkpoint(checkpoint_path="some/ckpt", test_parquet=test_path)
 
-            p_model.from_pretrained.assert_called_once_with("some/ckpt", num_labels=2)
+            p_model.from_pretrained.assert_called_once_with(
+                "some/ckpt", num_labels=2, local_files_only=True
+            )
+
+    def test_local_files_only_passed_for_absolute_checkpoint_path(self, tmp_path):
+        """
+        huggingface_hub validates repo ids and can reject an absolute local
+        checkpoint path as an invalid repo id — local_files_only=True tells
+        it this is a local path, not a hub lookup.
+        """
+        test_path, _, _ = _make_eval_test_parquet(tmp_path)
+        abs_ckpt_path = tmp_path / "xlmr_base_checkpoint"
+
+        model_mock = MagicMock()
+        model_mock.side_effect = lambda **batch: MagicMock(
+            logits=_proba_to_logits([0.5] * 8)
+        )
+        model_mock.to = MagicMock(return_value=model_mock)
+
+        with patch("src.eval.harness.AutoModelForSequenceClassification") as p_model, \
+             patch("src.eval.harness.AutoTokenizer") as p_tok:
+            p_model.from_pretrained.return_value = model_mock
+            p_tok.from_pretrained.return_value = _make_harness_tok_mock()
+
+            evaluate_checkpoint(checkpoint_path=abs_ckpt_path, test_parquet=test_path)
+
+            p_tok.from_pretrained.assert_called_once_with(abs_ckpt_path, local_files_only=True)
+            p_model.from_pretrained.assert_called_once_with(
+                abs_ckpt_path, num_labels=2, local_files_only=True
+            )
 
 
 class TestEvaluateCheckpointAdapter:
