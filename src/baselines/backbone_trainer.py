@@ -13,10 +13,9 @@ import json
 import logging
 from pathlib import Path
 
-import pandas as pd
-
 from src.config import load_config, resolve_path
 from src.baselines.supervised_baseline import SupervisedBaseline
+from src.eval.metrics import aggregate_seed_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -51,18 +50,21 @@ def train_all(force: bool = False,
         ckpt = resolve_path(cfg["checkpoint_dir"])
         checkpoints[key] = ckpt
 
-        if ckpt.exists() and not force:
-            logger.info("Checkpoint for %s already exists — skipping training.", key)
-            continue
-
         assert not cfg.get("fp16", False) or key != "mdeberta_v3_base", (
             "fp16 must be false for mdeberta_v3_base — check configs/models.yaml"
         )
 
-        logger.info("=== Training backbone: %s (%s) ===", key, cfg["model_id"])
         baseline = SupervisedBaseline(cfg=cfg)
-        baseline.train(train_path)
-        logger.info("Checkpoint saved: %s", ckpt)
+        for seed in baseline.seeds:
+            seed_ckpt = baseline.seed_checkpoint_dir(seed)
+            if not force and baseline.is_seed_complete(seed):
+                logger.info("Checkpoint for %s seed=%d already complete — skipping.",
+                            key, seed)
+                continue
+            logger.info("=== Training backbone: %s (%s) seed=%d ===",
+                        key, cfg["model_id"], seed)
+            baseline.train(train_path, seed=seed, checkpoint_dir=seed_ckpt)
+            logger.info("Checkpoint saved: %s", seed_ckpt)
 
     return checkpoints
 
@@ -70,9 +72,18 @@ def train_all(force: bool = False,
 def evaluate_all(languages: list[str] | None = None,
                  only: str | None = None) -> dict[str, dict[str, dict]]:
     """
-    Evaluate backbones against all language test sets.
+    Evaluate every backbone seed against all language test sets and aggregate
+    across seeds.
 
-    Returns nested dict: {backbone_key: {lang: metrics_dict}}.
+    Returns a nested dict:
+        {backbone_key: {lang: {
+            "accuracy": {"mean", "std", "values"},
+            "f1":       {"mean", "std", "values"},
+            "auroc":    {"mean", "std", "values"},
+            "n": int,
+            "seeds": [int, ...],
+            "per_seed": {seed: metrics_dict},
+        }}}
 
     only: if given, evaluate only that backbone key and skip the others.
     """
@@ -88,22 +99,33 @@ def evaluate_all(languages: list[str] | None = None,
         if only is not None and key != only:
             continue
         cfg = cfg_m[key]
-        ckpt = resolve_path(cfg["checkpoint_dir"])
-        logger.info("Loading backbone %s from %s …", key, ckpt)
-
         baseline = SupervisedBaseline(cfg=cfg)
-        baseline.load(ckpt)
+
+        # metrics[lang][seed] = metrics_dict
+        per_lang_seed: dict[str, dict[int, dict]] = {lang: {} for lang in languages}
+        for seed in baseline.seeds:
+            seed_ckpt = baseline.seed_checkpoint_dir(seed)
+            logger.info("Loading backbone %s seed=%d from %s …", key, seed, seed_ckpt)
+            baseline.load(seed_ckpt)
+            for lang in languages:
+                test_path = resolve_path(
+                    processed_cfg["test_template"].replace("{lang}", lang)
+                )
+                logger.info("  Evaluating %s seed=%d on test_%s …", key, seed, lang)
+                m = baseline.evaluate(test_path)
+                per_lang_seed[lang][seed] = m
+                logger.info("    accuracy=%.4f  F1=%.4f  AUROC=%.4f",
+                            m["accuracy"], m["f1"], m["auroc"])
 
         results[key] = {}
         for lang in languages:
-            test_path = resolve_path(
-                processed_cfg["test_template"].replace("{lang}", lang)
-            )
-            logger.info("  Evaluating %s on test_%s …", key, lang)
-            metrics = baseline.evaluate(test_path)
-            results[key][lang] = metrics
-            logger.info("    accuracy=%.4f  F1=%.4f  AUROC=%.4f",
-                        metrics["accuracy"], metrics["f1"], metrics["auroc"])
+            agg = aggregate_seed_metrics(per_lang_seed[lang])
+            agg["per_seed"] = {str(s): m for s, m in per_lang_seed[lang].items()}
+            results[key][lang] = agg
+            logger.info("  %s / %s  F1=%.4f ± %.4f  AUROC=%.4f ± %.4f",
+                        key, lang,
+                        agg["f1"]["mean"] or 0.0, agg["f1"]["std"] or 0.0,
+                        agg["auroc"]["mean"] or 0.0, agg["auroc"]["std"] or 0.0)
 
     return results
 

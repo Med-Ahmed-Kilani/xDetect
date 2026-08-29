@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 
 from src.config import load_config, resolve_path
+from src.eval.metrics import fmt_mean_std, mean_of
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +26,38 @@ def select_winner(
     """
     Select the backbone with the highest mean metric across all languages.
 
+    Each per-language entry may be a bare metric value (legacy single-seed) or
+    an aggregated ``{"mean": .., "std": ..}`` dict (multi-seed) — mean_of()
+    normalises both, so ranking is always by the across-seed mean.
+
     Returns (winner_key, per_backbone_mean_scores, is_tie).
     A tie is declared when the top-2 scores differ by less than CLOSE_THRESHOLD.
     """
     means: dict[str, float] = {}
     for backbone, lang_metrics in results.items():
-        values = [m[metric] for m in lang_metrics.values() if m.get(metric) is not None]
+        values = [
+            mean_of(m.get(metric))
+            for m in lang_metrics.values()
+            if mean_of(m.get(metric)) is not None
+        ]
         means[backbone] = sum(values) / len(values) if values else 0.0
 
     ranked = sorted(means.items(), key=lambda x: x[1], reverse=True)
     winner = ranked[0][0]
     is_tie = len(ranked) >= 2 and (ranked[0][1] - ranked[1][1]) < CLOSE_THRESHOLD
     return winner, means, is_tie
+
+
+def _seed_count(results: dict) -> int | str:
+    """Best-effort count of seeds behind the aggregated numbers."""
+    for lang_data in results.values():
+        for m in lang_data.values():
+            if isinstance(m, dict) and isinstance(m.get("seeds"), list):
+                return len(m["seeds"])
+            for entry in (m.values() if isinstance(m, dict) else []):
+                if isinstance(entry, dict) and isinstance(entry.get("values"), list):
+                    return len(entry["values"])
+    return "1 (legacy single-seed report)"
 
 
 def generate(comparison_json: Path | None = None, out: Path | None = None) -> Path:
@@ -60,10 +81,12 @@ def generate(comparison_json: Path | None = None, out: Path | None = None) -> Pa
     primary_winner = winner_f1
     is_tie = tie_f1
 
+    n_seeds = _seed_count(results)
     lines = [
         "=" * 70,
         "Month 2: Backbone Comparison Report",
         f"Generated from: {comparison_json}",
+        f"Seeds per condition: {n_seeds}  (values shown as mean ± std across seeds)",
         "=" * 70,
         "",
         "PER-BACKBONE RESULTS (accuracy / F1 / AUROC)",
@@ -77,22 +100,23 @@ def generate(comparison_json: Path | None = None, out: Path | None = None) -> Pa
         f1_vals, acc_vals, auroc_vals = [], [], []
         for lang in languages:
             m = lang_data.get(lang, {})
-            acc   = m.get("accuracy")
-            f1    = m.get("f1")
-            auroc = m.get("auroc")
+            acc   = mean_of(m.get("accuracy"))
+            f1    = mean_of(m.get("f1"))
+            auroc = mean_of(m.get("auroc"))
             if acc   is not None: acc_vals.append(acc)
             if f1    is not None: f1_vals.append(f1)
             if auroc is not None: auroc_vals.append(auroc)
-            auroc_str = f"{auroc:.4f}" if auroc is not None else "N/A"
             lines.append(
-                f"    test_{lang:<4s}  acc={acc:.4f}  F1={f1:.4f}  AUROC={auroc_str}"
+                f"    test_{lang:<4s}  acc={fmt_mean_std(m.get('accuracy'))}  "
+                f"F1={fmt_mean_std(m.get('f1'))}  AUROC={fmt_mean_std(m.get('auroc'))}"
                 if acc is not None else f"    test_{lang}: (missing)"
             )
         mean_acc   = sum(acc_vals)   / len(acc_vals)   if acc_vals   else 0.0
         mean_f1    = sum(f1_vals)    / len(f1_vals)    if f1_vals    else 0.0
         mean_auroc = sum(auroc_vals) / len(auroc_vals) if auroc_vals else 0.0
         lines.append(
-            f"    MEAN          acc={mean_acc:.4f}  F1={mean_f1:.4f}  AUROC={mean_auroc:.4f}"
+            f"    MEAN (across langs)  acc={mean_acc:.4f}  F1={mean_f1:.4f}  "
+            f"AUROC={mean_auroc:.4f}"
         )
         lines.append("")
 

@@ -22,6 +22,10 @@ supervised_baseline:
 # Month 2 multilingual backbone candidates.
 # All share the same hyperparameters so comparisons are fair.
 # fp16 is explicitly false for mdeberta (model card: fp16 unsupported).
+#
+# seeds: each backbone is trained once per seed. Per-seed checkpoints live in
+# <checkpoint_dir>/seed_<N>/ so a partially completed multi-seed run resumes
+# seed-by-seed. Comparison reports aggregate as mean ± std across seeds.
 mbert:
   model_id: "bert-base-multilingual-cased"
   num_labels: 2
@@ -31,7 +35,7 @@ mbert:
   num_epochs: 3
   warmup_ratio: 0.1
   weight_decay: 0.01
-  seed: 42
+  seeds: [42, 123, 456]
   fp16: false
   checkpoint_dir: "data/checkpoints/mbert"
 
@@ -44,7 +48,7 @@ xlmr_base:
   num_epochs: 3
   warmup_ratio: 0.1
   weight_decay: 0.01
-  seed: 42
+  seeds: [42, 123, 456]
   fp16: false
   checkpoint_dir: "data/checkpoints/xlmr_base"
 
@@ -57,7 +61,7 @@ mdeberta_v3_base:
   num_epochs: 3
   warmup_ratio: 0.1
   weight_decay: 0.01
-  seed: 42
+  seeds: [42, 123, 456]
   fp16: false        # mDeBERTa-v3 model card: fp16 training not supported
   adam_epsilon: 1.0e-6  # DeBERTa-v3 recommendation; mBERT/XLM-R keep PyTorch default (1e-8)
   checkpoint_dir: "data/checkpoints/mdeberta_v3_base"

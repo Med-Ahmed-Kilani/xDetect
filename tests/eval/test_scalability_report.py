@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from src.eval.metrics import aggregate_seed_metrics
 from src.eval.scalability_report import (
     compute_crossover,
     compute_data_efficiency_curve,
@@ -116,3 +117,40 @@ class TestGenerateEndToEnd:
         content = out_path.read_text()
         # de zero-shot AUROC=0.75; adapter at n=100 is 0.65 (below), n=500 is 0.80 (above)
         assert "at n=500" in content
+
+
+class TestGenerateMultiSeed:
+    """generate() renders mean ± std for every condition and still computes
+    curves / crossover / winner from the across-seed means."""
+
+    def _agg(self, u):
+        return {"overall": aggregate_seed_metrics({
+            42:  {"accuracy": u,        "f1": u,        "auroc": u},
+            123: {"accuracy": u - 0.02, "f1": u - 0.02, "auroc": u - 0.02},
+            456: {"accuracy": u + 0.02, "f1": u + 0.02, "auroc": u + 0.02},
+        })}
+
+    def _write(self, tmp_path):
+        results = {
+            "zero_shot": {"de": self._agg(0.75), "ar": self._agg(0.60)},
+            "few_shot_adapter": {
+                "de": {"100": self._agg(0.65), "500": self._agg(0.80), "full": self._agg(0.92)},
+                "ar": {"100": self._agg(0.55), "500": self._agg(0.58), "full": self._agg(0.62)},
+            },
+            "full_retrain": {"de": self._agg(0.94), "ar": self._agg(0.90)},
+        }
+        path = tmp_path / "scalability_results.json"
+        path.write_text(json.dumps(results))
+        return path
+
+    def test_mean_std_rendered_and_logic_uses_means(self, tmp_path):
+        out_path = tmp_path / "report.txt"
+        generate(results_json=self._write(tmp_path), out=out_path)
+        content = out_path.read_text()
+
+        assert "Seeds per condition: 3" in content
+        assert "0.7500 ± 0.0200" in content          # de zero-shot mean ± std
+        assert "0.9200 ± 0.0200" in content          # de full-data adapter
+        # crossover still derived from across-seed means
+        assert "at n=500" in content
+        assert "de: full_retrain" in content

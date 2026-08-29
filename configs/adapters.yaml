@@ -12,7 +12,8 @@ adapter_training:
   warmup_ratio: 0.1
   weight_decay: 0.01
   adam_epsilon: 1.0e-8
-  seed: 42
+  # Each adapter is trained once per seed into <output_dir>/seed_<N>/.
+  seeds: [42, 123, 456]
 
 scalability:
   target_languages: ["de", "ar"]
@@ -22,6 +23,9 @@ scalability:
   adapter_checkpoint_template: "data/checkpoints/adapters/{lang}_{n}"
   full_retrain_checkpoint_template: "data/checkpoints/full_retrain/{lang}"
   report_path: "reports/scalability_results.json"
+  # Every condition (zero-shot / few-shot-adapter / full-retrain) is run once
+  # per seed; the scalability report aggregates as mean ± std across seeds.
+  seeds: [42, 123, 456]
 
 full_retrain:
   num_epochs: 3
@@ -30,4 +34,4 @@ full_retrain:
   warmup_ratio: 0.1
   weight_decay: 0.01
   adam_epsilon: 1.0e-8
-  seed: 42
+  seeds: [42, 123, 456]

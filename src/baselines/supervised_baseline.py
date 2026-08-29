@@ -35,6 +35,7 @@ from transformers import (
 )
 
 from src.config import load_config, resolve_path
+from src.eval.metrics import aggregate_seed_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,14 @@ class SupervisedBaseline:
         self.num_epochs    = cfg["num_epochs"]
         self.warmup_ratio  = cfg["warmup_ratio"]
         self.weight_decay  = cfg["weight_decay"]
-        self.seed          = cfg["seed"]
+        # seeds: a multi-seed run trains once per seed. A legacy single "seed"
+        # key is accepted and treated as a one-element list. self.seed is the
+        # active seed for a single-seed train() call (default: the first seed).
+        if "seeds" in cfg:
+            self.seeds = list(cfg["seeds"])
+        else:
+            self.seeds = [cfg["seed"]]
+        self.seed          = self.seeds[0]
         self.checkpoint_dir = resolve_path(cfg["checkpoint_dir"])
         self.fp16          = cfg.get("fp16", False)
         self.adam_epsilon  = cfg.get("adam_epsilon", 1e-8)
@@ -122,34 +130,47 @@ class SupervisedBaseline:
     # Internal checkpoint helpers
     # ------------------------------------------------------------------
 
-    def _read_training_state(self) -> dict | None:
-        path = self.checkpoint_dir / _TRAINING_STATE
+    def seed_checkpoint_dir(self, seed: int) -> Path:
+        """Per-seed checkpoint sub-directory: <checkpoint_dir>/seed_<N>/."""
+        return self.checkpoint_dir / f"seed_{seed}"
+
+    def _read_training_state(self, checkpoint_dir: Path | None = None) -> dict | None:
+        path = (checkpoint_dir or self.checkpoint_dir) / _TRAINING_STATE
         if not path.exists():
             return None
         with open(path) as f:
             return json.load(f)
 
-    def _write_training_state(self, epoch_completed: int) -> None:
-        with open(self.checkpoint_dir / _TRAINING_STATE, "w") as f:
+    def _write_training_state(self, epoch_completed: int,
+                              checkpoint_dir: Path | None = None) -> None:
+        with open((checkpoint_dir or self.checkpoint_dir) / _TRAINING_STATE, "w") as f:
             json.dump({"epoch_completed": epoch_completed,
                        "num_epochs": self.num_epochs}, f)
 
+    def is_seed_complete(self, seed: int) -> bool:
+        """True if the per-seed checkpoint has all epochs recorded as done."""
+        state = self._read_training_state(self.seed_checkpoint_dir(seed))
+        return state is not None and state["epoch_completed"] >= self.num_epochs
+
     def _save_epoch(self, model, tokenizer, optimizer, scheduler,
-                    epoch_completed: int) -> None:
+                    epoch_completed: int, checkpoint_dir: Path | None = None) -> None:
         """Persist everything needed to resume from epoch_completed + 1."""
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(self.checkpoint_dir)
-        tokenizer.save_pretrained(self.checkpoint_dir)
-        torch.save(optimizer.state_dict(), self.checkpoint_dir / _OPTIMIZER_PT)
-        torch.save(scheduler.state_dict(), self.checkpoint_dir / _SCHEDULER_PT)
-        self._write_training_state(epoch_completed)
-        logger.info("Epoch %d checkpoint saved to %s", epoch_completed, self.checkpoint_dir)
+        checkpoint_dir = checkpoint_dir or self.checkpoint_dir
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(checkpoint_dir)
+        tokenizer.save_pretrained(checkpoint_dir)
+        torch.save(optimizer.state_dict(), checkpoint_dir / _OPTIMIZER_PT)
+        torch.save(scheduler.state_dict(), checkpoint_dir / _SCHEDULER_PT)
+        self._write_training_state(epoch_completed, checkpoint_dir)
+        logger.info("Epoch %d checkpoint saved to %s", epoch_completed, checkpoint_dir)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def train(self, train_parquet: str | Path) -> Path:
+    def train(self, train_parquet: str | Path, *,
+              seed: int | None = None,
+              checkpoint_dir: str | Path | None = None) -> Path:
         """
         Fine-tune the model on train_parquet.
 
@@ -157,26 +178,35 @@ class SupervisedBaseline:
         found in checkpoint_dir.  Returns immediately (without re-training)
         if all epochs are already complete.
 
+        seed / checkpoint_dir override self.seed / self.checkpoint_dir for
+        this call — used by run_multi_seed() to train one seed per
+        <checkpoint_dir>/seed_<N>/ sub-directory. When omitted the instance
+        defaults are used (unchanged single-seed behaviour).
+
         Returns the path to the checkpoint directory.
         """
-        _set_seed(self.seed)
+        seed = self.seed if seed is None else seed
+        checkpoint_dir = (self.checkpoint_dir if checkpoint_dir is None
+                          else Path(checkpoint_dir))
+
+        _set_seed(seed)
         self._load_tokenizer()
 
         # --- Decide where to start ---
-        state = self._read_training_state()
+        state = self._read_training_state(checkpoint_dir)
         if state is not None:
             epochs_done = state["epoch_completed"]
             if epochs_done >= self.num_epochs:
                 logger.info(
                     "All %d epochs already complete — skipping training, "
                     "returning existing checkpoint at %s.",
-                    self.num_epochs, self.checkpoint_dir,
+                    self.num_epochs, checkpoint_dir,
                 )
-                return self.checkpoint_dir
+                return checkpoint_dir
             start_epoch = epochs_done
             logger.info(
                 "Resuming from epoch %d/%d (checkpoint: %s).",
-                start_epoch + 1, self.num_epochs, self.checkpoint_dir,
+                start_epoch + 1, self.num_epochs, checkpoint_dir,
             )
         else:
             start_epoch = 0
@@ -190,13 +220,13 @@ class SupervisedBaseline:
         dataset = TextDataset(texts, labels, self._tokenizer, self.max_length)
         loader  = DataLoader(
             dataset, batch_size=self.batch_size, shuffle=True,
-            generator=torch.Generator().manual_seed(self.seed),
+            generator=torch.Generator().manual_seed(seed),
         )
 
         # --- Model ---
         if start_epoch > 0:
             model = AutoModelForSequenceClassification.from_pretrained(
-                self.checkpoint_dir, local_files_only=True
+                checkpoint_dir, local_files_only=True
             )
         else:
             model = AutoModelForSequenceClassification.from_pretrained(
@@ -220,11 +250,11 @@ class SupervisedBaseline:
 
         if start_epoch > 0:
             optimizer.load_state_dict(
-                torch.load(self.checkpoint_dir / _OPTIMIZER_PT,
+                torch.load(checkpoint_dir / _OPTIMIZER_PT,
                            map_location=self.device, weights_only=False)
             )
             scheduler.load_state_dict(
-                torch.load(self.checkpoint_dir / _SCHEDULER_PT,
+                torch.load(checkpoint_dir / _SCHEDULER_PT,
                            weights_only=False)
             )
 
@@ -258,11 +288,36 @@ class SupervisedBaseline:
 
             # Persist after every epoch so crashes don't lose work
             self._save_epoch(model, self._tokenizer, optimizer, scheduler,
-                             epoch_completed=epoch + 1)
+                             epoch_completed=epoch + 1,
+                             checkpoint_dir=checkpoint_dir)
 
         self._model = model
-        logger.info("Training complete. Checkpoint: %s", self.checkpoint_dir)
-        return self.checkpoint_dir
+        logger.info("Training complete. Checkpoint: %s", checkpoint_dir)
+        return checkpoint_dir
+
+    def run_multi_seed(self, train_parquet: str | Path,
+                       test_parquet: str | Path) -> dict[int, dict]:
+        """
+        Train the model once per configured seed, each into its own
+        <checkpoint_dir>/seed_<N>/ directory, and evaluate every seed on
+        test_parquet.
+
+        Per-seed checkpoint + epoch-resume logic is unchanged, so a partially
+        completed multi-seed run picks up where it left off: finished seeds are
+        skipped by train()'s own "all epochs complete" short-circuit, and an
+        interrupted seed resumes mid-run.
+
+        Returns {seed: metrics_dict}.
+        """
+        per_seed: dict[int, dict] = {}
+        for seed in self.seeds:
+            ckpt = self.seed_checkpoint_dir(seed)
+            logger.info("=== seed %d → %s ===", seed, ckpt)
+            self.train(train_parquet, seed=seed, checkpoint_dir=ckpt)
+            self.load(ckpt)
+            per_seed[seed] = self.evaluate(test_parquet)
+            logger.info("seed %d metrics: %s", seed, per_seed[seed])
+        return per_seed
 
     def load(self, checkpoint_dir: Optional[str | Path] = None) -> None:
         """Load a saved checkpoint."""
@@ -315,21 +370,29 @@ class SupervisedBaseline:
                      test_parquet: str | Path,
                      report_path: Optional[Path] = None) -> dict:
         """
-        Train, evaluate on test set, and save metrics to reports/.
+        Train once per seed, evaluate every seed on the test set, and save a
+        report holding both per-seed metrics and the mean ± std aggregate.
 
-        Returns the metrics dict.
+        Returns the aggregate dict ({metric: {"mean", "std", "values"}, ...}).
         """
-        self.train(train_parquet)
-        metrics = self.evaluate(test_parquet)
-        logger.info("Supervised baseline metrics: %s", metrics)
+        per_seed = self.run_multi_seed(train_parquet, test_parquet)
+        aggregate = aggregate_seed_metrics(per_seed)
+        logger.info("Supervised baseline aggregate (mean ± std): %s", aggregate)
 
         if report_path is None:
             report_path = resolve_path("reports/supervised_baseline_en.json")
         report_path.parent.mkdir(exist_ok=True)
         with open(report_path, "w") as f:
-            json.dump({"config": self.cfg, "metrics": metrics}, f, indent=2)
+            json.dump(
+                {
+                    "config": self.cfg,
+                    "per_seed": {str(s): m for s, m in per_seed.items()},
+                    "aggregate": aggregate,
+                },
+                f, indent=2,
+            )
         logger.info("Report saved to %s", report_path)
-        return metrics
+        return aggregate
 
 
 if __name__ == "__main__":

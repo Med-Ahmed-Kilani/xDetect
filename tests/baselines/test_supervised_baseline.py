@@ -456,6 +456,64 @@ class TestResumeFromCheckpoint:
 # training runs.
 # ---------------------------------------------------------------------------
 
+class TestMultiSeed:
+    """seeds: list → one checkpoint per seed under <checkpoint_dir>/seed_<N>/,
+    with the existing per-epoch resume logic preserved per seed."""
+
+    def _cfg(self, tmp_path):
+        return {**_BASE_CFG, "checkpoint_dir": str(tmp_path / "ckpt"),
+                "seeds": [42, 123, 456], "num_epochs": 2}
+
+    def test_seeds_parsed_from_config(self, tmp_path):
+        from src.baselines.supervised_baseline import SupervisedBaseline
+        b = SupervisedBaseline(cfg=self._cfg(tmp_path))
+        assert b.seeds == [42, 123, 456]
+        assert b.seed == 42   # active seed defaults to the first
+
+    def test_legacy_single_seed_key_still_supported(self):
+        from src.baselines.supervised_baseline import SupervisedBaseline
+        b = SupervisedBaseline(cfg=_BASE_CFG)   # has "seed": 42, no "seeds"
+        assert b.seeds == [42]
+        assert b.seed == 42
+
+    def test_seed_checkpoint_dir_layout(self, tmp_path):
+        from src.baselines.supervised_baseline import SupervisedBaseline
+        b = SupervisedBaseline(cfg=self._cfg(tmp_path))
+        assert b.seed_checkpoint_dir(123) == (tmp_path / "ckpt" / "seed_123")
+
+    def test_is_seed_complete_reads_per_seed_state(self, tmp_path):
+        from src.baselines.supervised_baseline import SupervisedBaseline
+        b = SupervisedBaseline(cfg=self._cfg(tmp_path))
+        assert not b.is_seed_complete(42)
+        _setup_checkpoint(b.seed_checkpoint_dir(42), epoch_completed=2, num_epochs=2)
+        _setup_checkpoint(b.seed_checkpoint_dir(123), epoch_completed=1, num_epochs=2)
+        assert b.is_seed_complete(42)          # all epochs done
+        assert not b.is_seed_complete(123)     # interrupted mid-run
+
+    def test_run_multi_seed_trains_once_per_seed_into_own_dir(self, tmp_path):
+        from src.baselines.supervised_baseline import SupervisedBaseline
+        b = SupervisedBaseline(cfg=self._cfg(tmp_path))
+
+        train_calls, eval_seeds = [], []
+        with patch.object(SupervisedBaseline, "train", autospec=True) as p_train, \
+             patch.object(SupervisedBaseline, "load", autospec=True) as p_load, \
+             patch.object(SupervisedBaseline, "evaluate", autospec=True) as p_eval:
+            p_train.side_effect = lambda self, tp, *, seed, checkpoint_dir: (
+                train_calls.append((seed, Path(checkpoint_dir))) or checkpoint_dir
+            )
+            p_eval.side_effect = lambda self, tp: {
+                "accuracy": 0.9, "f1": 0.9, "auroc": 0.9, "n": 10,
+            }
+
+            per_seed = b.run_multi_seed("train.parquet", "test.parquet")
+
+        assert [s for s, _ in train_calls] == [42, 123, 456]
+        for seed, ckpt in train_calls:
+            assert ckpt == tmp_path / "ckpt" / f"seed_{seed}"
+        assert set(per_seed) == {42, 123, 456}
+        assert per_seed[42]["f1"] == 0.9
+
+
 class TestLocalFilesOnlyKwarg:
     def test_hub_repo_id_gets_no_kwarg(self):
         from src.baselines.supervised_baseline import _local_files_only_kwarg

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.config import resolve_path
+from src.eval.metrics import fmt_mean_std, mean_of
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +28,36 @@ def _fmt(v) -> str:
     return f"{v:.4f}" if isinstance(v, (int, float)) else "N/A"
 
 
+def _seed_count(*conditions: dict) -> "int | str":
+    """Best-effort count of seeds behind the aggregated numbers."""
+    def walk(node):
+        if isinstance(node, dict):
+            if isinstance(node.get("seeds"), list):
+                return len(node["seeds"])
+            if isinstance(node.get("values"), list) and "mean" in node:
+                return len(node["values"])
+            for v in node.values():
+                found = walk(v)
+                if found is not None:
+                    return found
+        return None
+
+    for cond in conditions:
+        found = walk(cond)
+        if found is not None:
+            return found
+    return "1 (legacy single-seed report)"
+
+
 def compute_data_efficiency_curve(few_shot_lang: dict, metric: str = "auroc") -> list[tuple]:
-    """Returns [(n_samples, metric_value), ...] ordered smallest → "full"."""
+    """
+    Returns [(n_samples, metric_value), ...] ordered smallest → "full".
+
+    Each ``overall`` metric may be a bare number (legacy single-seed) or an
+    aggregated ``{"mean": .., "std": ..}`` dict — the curve carries the mean.
+    """
     sizes = sorted(few_shot_lang.keys(), key=_sort_key)
-    return [(n, few_shot_lang[n]["overall"].get(metric)) for n in sizes]
+    return [(n, mean_of(few_shot_lang[n]["overall"].get(metric))) for n in sizes]
 
 
 def compute_crossover(curve: list[tuple], zero_shot_value: Optional[float]) -> Optional[object]:
@@ -78,11 +105,13 @@ def generate(results_json: Optional[Path] = None, out: Optional[Path] = None) ->
     few_shot = results.get("few_shot_adapter", {})
     full_retrain = results.get("full_retrain", {})
     languages = sorted(set(zero_shot) | set(few_shot) | set(full_retrain))
+    n_seeds = _seed_count(zero_shot, few_shot, full_retrain)
 
     lines = [
         "=" * 70,
         "Month 3: Scalability Experiment Report",
         f"Generated from: {results_json}",
+        f"Seeds per condition: {n_seeds}  (values shown as mean ± std across seeds)",
         "=" * 70,
         "",
         "CONDITION x LANGUAGE x METRIC TABLE (accuracy / F1 / AUROC)",
@@ -93,19 +122,19 @@ def generate(results_json: Optional[Path] = None, out: Optional[Path] = None) ->
         lines.append(f"  Language: {lang}")
         zs = zero_shot.get(lang, {}).get("overall", {})
         lines.append(
-            f"    zero_shot         acc={_fmt(zs.get('accuracy'))}  "
-            f"F1={_fmt(zs.get('f1'))}  AUROC={_fmt(zs.get('auroc'))}"
+            f"    zero_shot         acc={fmt_mean_std(zs.get('accuracy'))}  "
+            f"F1={fmt_mean_std(zs.get('f1'))}  AUROC={fmt_mean_std(zs.get('auroc'))}"
         )
         for n in sorted(few_shot.get(lang, {}).keys(), key=_sort_key):
             m = few_shot[lang][n]["overall"]
             lines.append(
-                f"    adapter n={str(n):<6} acc={_fmt(m.get('accuracy'))}  "
-                f"F1={_fmt(m.get('f1'))}  AUROC={_fmt(m.get('auroc'))}"
+                f"    adapter n={str(n):<6} acc={fmt_mean_std(m.get('accuracy'))}  "
+                f"F1={fmt_mean_std(m.get('f1'))}  AUROC={fmt_mean_std(m.get('auroc'))}"
             )
         fr = full_retrain.get(lang, {}).get("overall", {})
         lines.append(
-            f"    full_retrain      acc={_fmt(fr.get('accuracy'))}  "
-            f"F1={_fmt(fr.get('f1'))}  AUROC={_fmt(fr.get('auroc'))}"
+            f"    full_retrain      acc={fmt_mean_std(fr.get('accuracy'))}  "
+            f"F1={fmt_mean_std(fr.get('f1'))}  AUROC={fmt_mean_std(fr.get('auroc'))}"
         )
         lines.append("")
 
@@ -115,7 +144,7 @@ def generate(results_json: Optional[Path] = None, out: Optional[Path] = None) ->
     winners: dict[str, tuple[str, dict]] = {}
     for lang in languages:
         curve = compute_data_efficiency_curve(few_shot.get(lang, {}))
-        zs_auroc = zero_shot.get(lang, {}).get("overall", {}).get("auroc")
+        zs_auroc = mean_of(zero_shot.get(lang, {}).get("overall", {}).get("auroc"))
         crossover = compute_crossover(curve, zs_auroc)
 
         lines.append(f"  Language: {lang}")
@@ -133,7 +162,7 @@ def generate(results_json: Optional[Path] = None, out: Optional[Path] = None) ->
         lines.append("")
 
         best_adapter = max((v for _, v in curve if v is not None), default=None)
-        fr_auroc = full_retrain.get(lang, {}).get("overall", {}).get("auroc")
+        fr_auroc = mean_of(full_retrain.get(lang, {}).get("overall", {}).get("auroc"))
         winners[lang] = declare_winner(zs_auroc, fr_auroc, best_adapter)
 
     lines += ["=" * 70, "WINNER DECLARATION (by AUROC)", "=" * 70, ""]

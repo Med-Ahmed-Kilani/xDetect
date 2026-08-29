@@ -13,6 +13,7 @@ import pytest
 
 from src.adapters import scalability_runner as sr
 
+_SEEDS = [42, 123]
 _ADAPTERS_CFG = {
     "scalability": {
         "target_languages": ["de", "ar"],
@@ -22,6 +23,7 @@ _ADAPTERS_CFG = {
         "adapter_checkpoint_template": "data/checkpoints/adapters/{lang}_{n}",
         "full_retrain_checkpoint_template": "data/checkpoints/full_retrain/{lang}",
         "report_path": "reports/scalability_results.json",
+        "seeds": _SEEDS,
     }
 }
 _DATASETS_CFG = {
@@ -68,7 +70,12 @@ class TestRunZeroShot:
             results = sr.run_zero_shot(["de", "ar"])
         assert set(results.keys()) == {"de", "ar"}
         for lang_result in results.values():
-            assert lang_result["overall"]["accuracy"] == 0.9
+            # aggregated across seeds: mean ± std + per-seed breakdown
+            agg = lang_result["overall"]["accuracy"]
+            assert agg["mean"] == 0.9
+            assert agg["std"] == 0.0
+            assert lang_result["overall"]["seeds"] == _SEEDS
+            assert set(lang_result["per_seed"].keys()) == {str(s) for s in _SEEDS}
 
 
 class TestRunFewShotAdapters:
@@ -78,7 +85,10 @@ class TestRunFewShotAdapters:
         assert set(results.keys()) == {"de", "ar"}
         for lang in ["de", "ar"]:
             assert set(results[lang].keys()) == {"100", "500", "full"}
-        assert mocks["trainer"].train.call_count == 6
+            for agg in results[lang].values():
+                assert agg["overall"]["seeds"] == _SEEDS
+        # one train() call per (language, size, seed) triple
+        assert mocks["trainer"].train.call_count == 2 * 3 * len(_SEEDS)
 
 
 class TestRunFullRetrain:
@@ -86,7 +96,9 @@ class TestRunFullRetrain:
         with _runner_ctx(tmp_path) as mocks:
             results = sr.run_full_retrain(["de", "ar"])
         assert set(results.keys()) == {"de", "ar"}
-        assert mocks["retrainer"].train.call_count == 2
+        for agg in results.values():
+            assert agg["overall"]["seeds"] == _SEEDS
+        assert mocks["retrainer"].train.call_count == 2 * len(_SEEDS)
 
 
 class TestRunFull:
