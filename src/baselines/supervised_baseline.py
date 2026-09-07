@@ -231,6 +231,7 @@ class SupervisedBaseline:
         else:
             model = AutoModelForSequenceClassification.from_pretrained(
                 self.model_id, num_labels=self.num_labels,
+                use_safetensors=False,
                 **_local_files_only_kwarg(self.model_id)
             )
         model.to(self.device)

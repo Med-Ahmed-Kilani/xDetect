@@ -565,7 +565,8 @@ class TestLocalFilesOnlyTrain:
             str(backbone_dir), local_files_only=True
         )
         mocks["model_cls"].from_pretrained.assert_called_once_with(
-            str(backbone_dir), num_labels=_BASE_CFG["num_labels"], local_files_only=True
+            str(backbone_dir), num_labels=_BASE_CFG["num_labels"],
+            use_safetensors=False, local_files_only=True
         )
 
     def test_hub_model_id_does_not_pass_local_files_only(self, tmp_path):
@@ -580,5 +581,6 @@ class TestLocalFilesOnlyTrain:
 
         mocks["tok_cls"].from_pretrained.assert_called_once_with(_BASE_CFG["model_id"])
         mocks["model_cls"].from_pretrained.assert_called_once_with(
-            _BASE_CFG["model_id"], num_labels=_BASE_CFG["num_labels"]
+            _BASE_CFG["model_id"], num_labels=_BASE_CFG["num_labels"],
+            use_safetensors=False
         )
