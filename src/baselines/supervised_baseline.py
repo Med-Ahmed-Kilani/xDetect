@@ -250,15 +250,12 @@ class SupervisedBaseline:
         # --- Model ---
         if start_epoch > 0:
             model = AutoModelForSequenceClassification.from_pretrained(
-                checkpoint_dir, local_files_only=True,
-                attn_implementation="sdpa",
+                checkpoint_dir, local_files_only=True
             )
         else:
             resolved_id = _resolve_local_or_hub(self.model_id)
             model = AutoModelForSequenceClassification.from_pretrained(
                 resolved_id, num_labels=self.num_labels,
-                low_cpu_mem_usage=False,
-                attn_implementation="sdpa",
                 **_local_files_only_kwarg(resolved_id)
             )
         model.to(self.device)
