@@ -102,6 +102,11 @@ def _train_ctx(cfg, loss_values, train_path, extra_patches=()):
             return_value=sched_mock))
         stack.enter_context(patch(
             "src.baselines.supervised_baseline.resolve_path", side_effect=lambda p: p))
+        # No HF cache in the test env — force _resolve_local_or_hub to fall
+        # back to the original id so from_pretrained is asserted with it.
+        stack.enter_context(patch(
+            "src.baselines.supervised_baseline.snapshot_download",
+            side_effect=OSError("not cached")))
         # Non-resume tests don't exercise checkpointing; mock it out entirely
         # so these tests don't depend on the checkpoint dir existing on disk.
         stack.enter_context(patch(
@@ -335,6 +340,8 @@ class TestResumeFromCheckpoint:
                                   return_value=sched_mock))
         stack.enter_context(patch("torch.optim.AdamW", return_value=adamw_mock))
         stack.enter_context(patch("torch.save"))   # prevent pickling MagicMock state dicts
+        stack.enter_context(patch("src.baselines.supervised_baseline.snapshot_download",
+                                  side_effect=OSError("not cached")))
 
         p_tok.from_pretrained.return_value   = tok_mock
         p_model.from_pretrained.return_value = model_mock
@@ -565,8 +572,7 @@ class TestLocalFilesOnlyTrain:
             str(backbone_dir), local_files_only=True
         )
         mocks["model_cls"].from_pretrained.assert_called_once_with(
-            str(backbone_dir), num_labels=_BASE_CFG["num_labels"],
-            use_safetensors=False, local_files_only=True
+            str(backbone_dir), num_labels=_BASE_CFG["num_labels"], local_files_only=True
         )
 
     def test_hub_model_id_does_not_pass_local_files_only(self, tmp_path):
@@ -581,6 +587,5 @@ class TestLocalFilesOnlyTrain:
 
         mocks["tok_cls"].from_pretrained.assert_called_once_with(_BASE_CFG["model_id"])
         mocks["model_cls"].from_pretrained.assert_called_once_with(
-            _BASE_CFG["model_id"], num_labels=_BASE_CFG["num_labels"],
-            use_safetensors=False
+            _BASE_CFG["model_id"], num_labels=_BASE_CFG["num_labels"]
         )

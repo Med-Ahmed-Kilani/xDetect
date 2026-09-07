@@ -28,6 +28,7 @@ import torch
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+from huggingface_hub import snapshot_download
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
@@ -53,6 +54,28 @@ def _local_files_only_kwarg(model_id_or_path) -> dict:
     local_files_only=True to signal "this is a path, not a hub lookup".
     """
     return {"local_files_only": True} if Path(str(model_id_or_path)).is_dir() else {}
+
+
+def _resolve_local_or_hub(model_id: str) -> str:
+    """
+    Resolve a model id to an on-disk path when possible, so from_pretrained
+    never has to hit the Hub's repo-resolution logic (which, on flaky Kaggle
+    connections, can hang indefinitely resolving a safetensors-conversion PR
+    branch instead of loading pytorch_model.bin from main).
+
+    - A local directory (warm-start checkpoint) is returned unchanged.
+    - Otherwise, if the model is already in the local HF cache,
+      snapshot_download(local_files_only=True) returns that cached snapshot
+      path with no network access.
+    - If it isn't cached (or anything else goes wrong), the original id is
+      returned unchanged so the normal online download path still applies.
+    """
+    if Path(model_id).is_dir():
+        return model_id
+    try:
+        return snapshot_download(model_id, local_files_only=True)
+    except Exception:
+        return model_id
 
 
 def _set_seed(seed: int) -> None:
@@ -122,8 +145,9 @@ class SupervisedBaseline:
 
     def _load_tokenizer(self) -> None:
         if self._tokenizer is None:
+            resolved_id = _resolve_local_or_hub(self.model_id)
             self._tokenizer = AutoTokenizer.from_pretrained(
-                self.model_id, **_local_files_only_kwarg(self.model_id)
+                resolved_id, **_local_files_only_kwarg(resolved_id)
             )
 
     # ------------------------------------------------------------------
@@ -229,10 +253,10 @@ class SupervisedBaseline:
                 checkpoint_dir, local_files_only=True
             )
         else:
+            resolved_id = _resolve_local_or_hub(self.model_id)
             model = AutoModelForSequenceClassification.from_pretrained(
-                self.model_id, num_labels=self.num_labels,
-                use_safetensors=False,
-                **_local_files_only_kwarg(self.model_id)
+                resolved_id, num_labels=self.num_labels,
+                **_local_files_only_kwarg(resolved_id)
             )
         model.to(self.device)
 
