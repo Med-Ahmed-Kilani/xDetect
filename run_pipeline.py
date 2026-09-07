@@ -55,6 +55,9 @@ def main() -> None:
     parser.add_argument("--only", metavar="MODEL_KEY",
                         help="(--backbone) Train and evaluate only this backbone key "
                              "(mbert | xlmr_base | mdeberta_v3_base); skip the others")
+    parser.add_argument("--seed", metavar="SEED", type=int,
+                        help="(--backbone) Train only this seed and skip the others; "
+                             "omit to train every configured seed")
     parser.add_argument("--scalability", action="store_true",
                         help="Run Month 3 adapter scalability experiment "
                              "(zero-shot / few-shot-adapter / full-retrain)")
@@ -124,7 +127,8 @@ def main() -> None:
             else:
                 logger.info("=== Steps 6–7: Backbone training + evaluation ===")
             from src.baselines.backbone_trainer import run as run_backbone
-            comparison_json = run_backbone(force=args.force, only=only)
+            comparison_json = run_backbone(force=args.force, only=only,
+                                           only_seed=args.seed)
 
         # Step 8 — Backbone comparison report
         logger.info("=== Step 8: Generating backbone comparison report ===")

@@ -23,7 +23,8 @@ BACKBONE_KEYS = ["mbert", "xlmr_base", "mdeberta_v3_base"]
 
 
 def train_all(force: bool = False,
-              only: str | None = None) -> dict[str, Path]:
+              only: str | None = None,
+              only_seed: int | None = None) -> dict[str, Path]:
     """
     Fine-tune each backbone on the pooled training set.
 
@@ -31,6 +32,7 @@ def train_all(force: bool = False,
     Skips a backbone if its checkpoint already exists and force=False.
 
     only: if given, train only that backbone key and skip the others.
+    only_seed: if given, train only that seed and skip the others.
     """
     if only is not None and only not in BACKBONE_KEYS:
         raise ValueError(f"--only '{only}' is not a valid backbone key. "
@@ -56,6 +58,9 @@ def train_all(force: bool = False,
 
         baseline = SupervisedBaseline(cfg=cfg)
         for seed in baseline.seeds:
+            if only_seed is not None and seed != only_seed:
+                logger.info("Skipping %s seed=%d (--seed %d).", key, seed, only_seed)
+                continue
             seed_ckpt = baseline.seed_checkpoint_dir(seed)
             if not force and baseline.is_seed_complete(seed):
                 logger.info("Checkpoint for %s seed=%d already complete — skipping.",
@@ -130,16 +135,18 @@ def evaluate_all(languages: list[str] | None = None,
     return results
 
 
-def run(force: bool = False, only: str | None = None) -> Path:
+def run(force: bool = False, only: str | None = None,
+        only_seed: int | None = None) -> Path:
     """
     Train backbones, evaluate, and write the comparison JSON.
 
     force: re-train even if a checkpoint already exists.
     only:  train and evaluate only this backbone key, skip the others.
+    only_seed: train only this seed, skip the others.
 
     Returns path to the saved JSON report.
     """
-    train_all(force=force, only=only)
+    train_all(force=force, only=only, only_seed=only_seed)
     results = evaluate_all(only=only)
 
     report_dir = resolve_path(load_config("models")["eval"]["report_dir"])
