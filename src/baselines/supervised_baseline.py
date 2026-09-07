@@ -256,6 +256,7 @@ class SupervisedBaseline:
             resolved_id = _resolve_local_or_hub(self.model_id)
             model = AutoModelForSequenceClassification.from_pretrained(
                 resolved_id, num_labels=self.num_labels,
+                low_cpu_mem_usage=False,
                 **_local_files_only_kwarg(resolved_id)
             )
         model.to(self.device)
