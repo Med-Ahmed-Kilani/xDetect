@@ -2,7 +2,15 @@
 from typing import Optional
 
 import numpy as np
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 
 _METRIC_KEYS = ("accuracy", "f1", "auroc")
 
@@ -71,11 +79,26 @@ def compute_metrics(
     preds: np.ndarray,
     proba: Optional[np.ndarray] = None,
 ) -> dict:
-    """Compute accuracy, F1, and (if proba given) AUROC."""
+    """
+    Compute accuracy, F1, and (if proba given) AUROC, plus balanced accuracy,
+    macro-F1, per-class precision/recall (human is label 0, machine label 1),
+    and the confusion matrix as a JSON-serializable nested list.
+    """
     result = {
         "n": int(len(labels)),
         "accuracy": float(accuracy_score(labels, preds)),
         "f1": float(f1_score(labels, preds, zero_division=0)),
+        "balanced_accuracy": float(balanced_accuracy_score(labels, preds)),
+        "macro_f1": float(f1_score(labels, preds, average="macro", zero_division=0)),
+        "precision_human": float(
+            precision_score(labels, preds, pos_label=0, zero_division=0)
+        ),
+        "recall_human": float(
+            recall_score(labels, preds, pos_label=0, zero_division=0)
+        ),
+        "precision_machine": float(precision_score(labels, preds, zero_division=0)),
+        "recall_machine": float(recall_score(labels, preds, zero_division=0)),
+        "confusion_matrix": confusion_matrix(labels, preds).tolist(),
     }
     if proba is not None and len(np.unique(labels)) > 1:
         result["auroc"] = float(roc_auc_score(labels, proba))
